@@ -68,3 +68,7 @@ ENV HERMES_HOME=/opt/data
 # NOTE: No VOLUME instruction — Railway disallows it. The Railway Volume
 # attached to this service provides /opt/data at runtime.
 ENTRYPOINT [ "/opt/hermes/docker/entrypoint.sh" ]
+# CMD is the default args passed to ENTRYPOINT when the image is run with
+# `docker run` and no explicit command. Railway overrides this via
+# `startCommand` in railway.toml (see the note there for why).
+CMD [ "gateway", "run" ]
