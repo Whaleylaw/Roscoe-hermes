@@ -7,8 +7,10 @@ agent from Telegram 24/7 without keeping your laptop online.
 
 ## What you end up with
 
-- A single Railway service running `hermes gateway run` from the project's
-  Dockerfile.
+- A single Railway service running `hermes gateway run` from
+  `Dockerfile.railway` (a Railway-specific copy of the main Dockerfile with
+  the `VOLUME` instruction removed — Railway rejects Dockerfiles that
+  declare Docker VOLUMEs).
 - A persistent volume at `/opt/data` holding your `.env`, `config.yaml`,
   sessions, memories, and skills — upgrades don't touch it.
 - Long-polling Telegram connection (no public HTTP port, no webhook, no TLS).
