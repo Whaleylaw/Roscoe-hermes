@@ -1,0 +1,32 @@
+# Railway deployment config for Hermes Agent (gateway mode).
+#
+# This runs Hermes as a 24/7 messaging gateway (Telegram by default).
+# The gateway uses long-polling, so no public HTTP port is required —
+# Railway treats this as a worker service.
+#
+# Required setup (once, via the Railway dashboard or CLI):
+#   1. Create a persistent volume and mount it at /opt/data
+#      (this stores API keys, sessions, memories, skills, and config).
+#   2. Set these variables under the service's Variables tab:
+#        OPENROUTER_API_KEY   = sk-or-...
+#        TELEGRAM_BOT_TOKEN   = 1234:AA...
+#        TELEGRAM_ALLOWED_USERS = <your numeric Telegram user id>
+#
+# See docs/cloud-deployment-railway.md for the full walkthrough.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# The Dockerfile's ENTRYPOINT is docker/entrypoint.sh, which execs
+# `hermes "$@"`. Railway passes startCommand as the argument list.
+startCommand = "gateway run"
+
+# Keep the gateway alive — long-poll reconnects, transient crashes, etc.
+restartPolicyType = "ALWAYS"
+restartPolicyMaxRetries = 10
+
+# Single instance only: Hermes state (sessions, memory, skills) is not
+# designed for concurrent access against the same data volume.
+numReplicas = 1
