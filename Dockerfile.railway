@@ -25,15 +25,25 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive
 
 # System dependencies:
-#   build-essential, libffi-dev, curl, ca-certificates → native wheels (cryptography, etc.)
-#   nodejs, npm                                        → Playwright + whatsapp-bridge
-#   ripgrep                                            → hermes code search tool
-#   ffmpeg                                             → voice memo transcription
+#   build-essential, libffi-dev, curl, ca-certificates, gnupg → native
+#                                                                wheels +
+#                                                                NodeSource key
+#   ripgrep                                                    → hermes code search
+#   ffmpeg                                                     → voice memo transcription
+# Node.js is installed separately from NodeSource (see next RUN) because
+# bookworm ships Node 18 and several Hermes npm deps — better-sqlite3,
+# camoufox-js, impit, undici, cheerio, language-tags — require Node 20+.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        build-essential libffi-dev curl ca-certificates \
-        nodejs npm ripgrep ffmpeg && \
+        build-essential libffi-dev curl ca-certificates gnupg \
+        ripgrep ffmpeg && \
     rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 LTS via NodeSource.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/* && \
+    node --version && npm --version
 
 # uv: fast, resolver-sane replacement for pip. Installed via pip into the
 # base image's system Python; we then use `uv pip install --system` so
