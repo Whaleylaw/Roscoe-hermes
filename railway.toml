@@ -16,7 +16,10 @@
 
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "Dockerfile"
+# Uses Dockerfile.railway instead of ./Dockerfile because Railway rejects
+# Dockerfiles that declare `VOLUME` (see Dockerfile.railway header for the
+# full story). Keep Dockerfile.railway in sync with the main Dockerfile.
+dockerfilePath = "Dockerfile.railway"
 
 [deploy]
 # The Dockerfile's ENTRYPOINT is docker/entrypoint.sh, which execs
