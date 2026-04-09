@@ -22,9 +22,12 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile.railway"
 
 [deploy]
-# The Dockerfile's ENTRYPOINT is docker/entrypoint.sh, which execs
-# `hermes "$@"`. Railway passes startCommand as the argument list.
-startCommand = "gateway run"
+# Railway treats startCommand as the literal command to run — it does NOT
+# append it as arguments to the Docker ENTRYPOINT the way `docker run` would.
+# So we invoke the entrypoint script explicitly here, passing `gateway run`
+# as its argument list. The entrypoint bootstraps /opt/data on first start,
+# then execs `hermes gateway run`.
+startCommand = "/opt/hermes/docker/entrypoint.sh gateway run"
 
 # Keep the gateway alive — long-poll reconnects, transient crashes, etc.
 restartPolicyType = "ALWAYS"
