@@ -22,10 +22,10 @@ class LocalApprovalRouter(ApprovalRouter):
         # Force status to pending_review regardless of input.
         result.status = TaskStatus.PENDING_REVIEW
         logger.warning(
-            "APPROVAL REQUIRED — task=%s worker=%s status=%s output=%r",
+            "APPROVAL REQUIRED — task=%s agent=%s orchestrator=%s output=%r",
             result.task_id,
-            result.worker_id,
-            result.status.value,
+            result.agent_id,
+            result.orchestrator_id,
             result.output,
         )
         return True
