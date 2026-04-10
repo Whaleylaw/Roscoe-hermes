@@ -54,4 +54,28 @@ if [ -d "$INSTALL_DIR/skills" ]; then
     python3 "$INSTALL_DIR/tools/skills_sync.py"
 fi
 
+# Lane 1: Clone/update FirmVault for the case pipeline engine.
+# The vault lives on the persistent volume so case state survives rebuilds.
+FIRMVAULT_DIR="$HERMES_HOME/firmvault"
+if [ ! -d "$FIRMVAULT_DIR/.git" ]; then
+    echo "entrypoint: cloning FirmVault..."
+    git clone https://github.com/Whaleylaw/FirmVault.git "$FIRMVAULT_DIR" 2>&1 | tail -1
+else
+    echo "entrypoint: updating FirmVault..."
+    git -C "$FIRMVAULT_DIR" pull --ff-only origin main 2>&1 | tail -1 || true
+fi
+
+# Lane 2: Clone/update GSD library for ad-hoc projects.
+GSD_DIR="$HERMES_HOME/gsd-lawyerinc"
+if [ ! -d "$GSD_DIR/.git" ]; then
+    echo "entrypoint: cloning GSD..."
+    git clone https://github.com/Whaleylaw/gsd-lawyerinc.git "$GSD_DIR" 2>&1 | tail -1
+else
+    echo "entrypoint: updating GSD..."
+    git -C "$GSD_DIR" pull --ff-only origin main 2>&1 | tail -1 || true
+fi
+
+# Ensure projects directory exists for GSD ad-hoc projects
+mkdir -p "$HERMES_HOME/projects"
+
 exec hermes "$@"
