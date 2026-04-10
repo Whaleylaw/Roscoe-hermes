@@ -39,6 +39,14 @@ if [ ! -f "$HERMES_HOME/.env" ]; then
     cp "$INSTALL_DIR/.env.example" "$HERMES_HOME/.env"
 fi
 
+# Export .env so daemon adapters and subprocesses get the keys.
+# Lines starting with # are skipped; values are trimmed of quotes.
+if [ -f "$HERMES_HOME/.env" ]; then
+    set -a
+    . "$HERMES_HOME/.env"
+    set +a
+fi
+
 # config.yaml
 if [ ! -f "$HERMES_HOME/config.yaml" ]; then
     cp "$INSTALL_DIR/cli-config.yaml.example" "$HERMES_HOME/config.yaml"
