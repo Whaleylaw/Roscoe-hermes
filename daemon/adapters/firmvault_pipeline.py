@@ -59,8 +59,7 @@ class FirmVaultAdapter(HealthCheckable):
         )
         self.runtime_dir = self.vault_dir / "skills.tools.workflows" / "runtime"
         self.mc_url = os.environ.get("MC_URL", "")
-        self.mc_token = os.environ.get("MC_TOKEN", "")
-        self.mc_board_id = os.environ.get("MC_BOARD_ID", "")
+        self.mc_api_key = os.environ.get("MC_API_KEY", os.environ.get("MC_TOKEN", ""))
         self.repo_url = os.environ.get(
             "FIRMVAULT_REPO",
             "https://github.com/Whaleylaw/FirmVault.git"
@@ -73,7 +72,7 @@ class FirmVaultAdapter(HealthCheckable):
             self.vault_dir.exists()
             and (self.runtime_dir / "engine.py").exists()
             and bool(self.mc_url)
-            and bool(self.mc_token)
+            and bool(self.mc_api_key)
         )
 
     # ── HealthCheckable ────────────────────────────────────────────────
@@ -95,7 +94,7 @@ class FirmVaultAdapter(HealthCheckable):
                 error="FirmVault runtime not found at expected path",
             )
 
-        if not self.mc_url or not self.mc_token:
+        if not self.mc_url or not self.mc_api_key:
             return HealthStatus(
                 service_name="firmvault",
                 healthy=False,
@@ -249,16 +248,13 @@ print(json.dumps(result))
             return
 
         args = f"push {self.vault_dir}"
-        if self.mc_board_id:
-            args += f" --board-id {self.mc_board_id}"
 
         result = self._run_shell(
             f"python3 {bridge_path} {args}",
             cwd=str(self.vault_dir),
             env_extra={
                 "MC_URL": self.mc_url,
-                "MC_TOKEN": self.mc_token,
-                "MC_BOARD_ID": self.mc_board_id,
+                "MC_API_KEY": self.mc_api_key,
             },
         )
         if result.get("exit_code") == 0:
@@ -273,16 +269,13 @@ print(json.dumps(result))
             return
 
         args = f"pull {self.vault_dir}"
-        if self.mc_board_id:
-            args += f" --board-id {self.mc_board_id}"
 
         result = self._run_shell(
             f"python3 {bridge_path} {args}",
             cwd=str(self.vault_dir),
             env_extra={
                 "MC_URL": self.mc_url,
-                "MC_TOKEN": self.mc_token,
-                "MC_BOARD_ID": self.mc_board_id,
+                "MC_API_KEY": self.mc_api_key,
             },
         )
         if result.get("exit_code") == 0:
