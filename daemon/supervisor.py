@@ -172,6 +172,13 @@ class Supervisor:
             except Exception as exc:
                 logger.error("lane1: FirmVault tick error — %s", exc, exc_info=True)
 
+        # ── MC heartbeat ──────────────────────────────────────────────
+        if self._mission_control.configured:
+            try:
+                await self._mission_control.send_heartbeat()
+            except Exception as exc:
+                logger.debug("mc heartbeat error: %s", exc)
+
         # ── Lane 2: GSD + OpenClaw orchestration ────────────────────
         # 1. Health check upstream services.
         statuses = await check_all(self._health_targets)

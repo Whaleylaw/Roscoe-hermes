@@ -56,7 +56,10 @@ class DaemonConfig:
         )
     )
     mission_control_url: str = field(
-        default_factory=lambda: os.getenv("MISSION_CONTROL_URL", "")
+        default_factory=lambda: os.getenv(
+            "MISSION_CONTROL_URL",
+            os.getenv("MC_URL", ""),
+        )
     )
     firmvault_url: str = field(
         default_factory=lambda: os.getenv("FIRMVAULT_URL", "")
