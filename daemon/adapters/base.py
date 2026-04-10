@@ -1,4 +1,4 @@
-"""Abstract base classes for service adapters."""
+"""Abstract base classes and shared data types for service adapters."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 class TaskStatus(str, Enum):
     PENDING = "pending"
-    CLAIMED = "claimed"
+    ASSIGNED = "assigned"       # Delegated to an OpenClaw agent
     IN_PROGRESS = "in_progress"
     PENDING_REVIEW = "pending_review"  # Approval-only output state
     APPROVED = "approved"
@@ -22,19 +22,21 @@ class TaskStatus(str, Enum):
 
 @dataclass
 class Task:
-    """A unit of work pulled from the queue."""
+    """A unit of work to be delegated to an OpenClaw agent."""
     id: str
     type: str  # e.g. "document_review", "research", "drafting"
     payload: dict = field(default_factory=dict)
     metadata: dict = field(default_factory=dict)
     status: TaskStatus = TaskStatus.PENDING
+    assigned_agent: Optional[str] = None
 
 
 @dataclass
 class TaskResult:
-    """Output produced by executing a Task."""
+    """Output collected from an OpenClaw agent after task completion."""
     task_id: str
-    worker_id: str
+    agent_id: str  # The OpenClaw agent that produced this result
+    orchestrator_id: str = ""  # Hermes worker_id that orchestrated
     output: Any = None
     error: Optional[str] = None
     status: TaskStatus = TaskStatus.PENDING_REVIEW  # Safe default
@@ -51,20 +53,16 @@ class HealthStatus:
 
 # ── Abstract adapters ────────────────────────────────────────────────
 
-class QueueAdapter(abc.ABC):
-    """Interface for polling a work queue and claiming tasks."""
+class TaskSource(abc.ABC):
+    """Interface for pulling orchestration tasks (from Mission Control)."""
 
     @abc.abstractmethod
-    async def poll(self) -> Optional[Task]:
-        """Return the next available task, or None if the queue is empty."""
+    async def poll_tasks(self) -> list[Task]:
+        """Return available tasks that need orchestration."""
 
     @abc.abstractmethod
-    async def claim(self, task: Task, worker_id: str) -> bool:
-        """Attempt to claim *task* for *worker_id*.  Return True on success."""
-
-    @abc.abstractmethod
-    async def report(self, result: TaskResult) -> bool:
-        """Submit *result* back to the queue.  Return True on success."""
+    async def update_task_status(self, task_id: str, status: TaskStatus) -> bool:
+        """Update the status of a task in the source system."""
 
 
 class HealthCheckable(abc.ABC):
