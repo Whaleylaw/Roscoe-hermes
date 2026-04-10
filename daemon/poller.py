@@ -1,111 +1,120 @@
-"""Task poller — polls adapters for work, claims, and routes results."""
+"""Orchestration loop — polls for tasks, delegates to OpenClaw agents, collects results."""
 
 from __future__ import annotations
 
 import logging
-from typing import Optional, Sequence
+from typing import Optional
 
 from daemon.adapters.base import (
     ApprovalRouter,
-    QueueAdapter,
     Task,
     TaskResult,
+    TaskSource,
     TaskStatus,
 )
+from daemon.adapters.openclaw import OpenClawAdapter
 
 logger = logging.getLogger("daemon.poller")
 
 
-async def poll_for_work(queues: Sequence[QueueAdapter]) -> Optional[tuple[QueueAdapter, Task]]:
-    """Poll each queue adapter in priority order.  Return the first available task."""
-    for queue in queues:
+async def poll_for_tasks(sources: list[TaskSource]) -> list[Task]:
+    """Poll task sources (e.g. Mission Control) for work that needs orchestrating."""
+    tasks: list[Task] = []
+    for source in sources:
         try:
-            task = await queue.poll()
-            if task is not None:
-                logger.info("poll: found task %s (type=%s) from %s",
-                            task.id, task.type, type(queue).__name__)
-                return queue, task
+            batch = await source.poll_tasks()
+            if batch:
+                logger.info("poll: got %d task(s) from %s", len(batch), type(source).__name__)
+                tasks.extend(batch)
         except Exception as exc:
-            logger.error("poll: error from %s — %s", type(queue).__name__, exc)
-    return None
+            logger.error("poll: error from %s — %s", type(source).__name__, exc)
+    if not tasks:
+        logger.info("poll: no tasks available from any source")
+    return tasks
 
 
-async def claim_task(queue: QueueAdapter, task: Task, worker_id: str) -> bool:
-    """Attempt to claim *task* via its source queue."""
-    try:
-        ok = await queue.claim(task, worker_id)
-        if ok:
-            logger.info("claim: task %s claimed by worker %s", task.id, worker_id)
-        else:
-            logger.warning("claim: failed to claim task %s (already taken?)", task.id)
-        return ok
-    except Exception as exc:
-        logger.error("claim: error claiming task %s — %s", task.id, exc)
+async def delegate_task(
+    task: Task,
+    openclaw: OpenClawAdapter,
+    orchestrator_id: str,
+) -> bool:
+    """Pick an available OpenClaw agent and delegate the task to it.
+
+    TODO: Implement agent selection logic (by specialization, availability, etc.).
+    For now this attempts to delegate to the first idle agent, or logs that
+    no agents are available.
+    """
+    agents = await openclaw.list_agents()
+    idle_agents = [a for a in agents if a.status == "idle"]
+
+    if not idle_agents:
+        logger.warning("delegate: no idle OpenClaw agents available for task %s", task.id)
         return False
 
+    # Simple selection: pick the first idle agent.
+    # TODO: Match task.type to agent specialization.
+    target = idle_agents[0]
+    logger.info("delegate: assigning task %s → agent %s (%s)",
+                task.id, target.agent_id, target.name)
 
-async def execute_task(task: Task, worker_id: str) -> TaskResult:
-    """Execute *task* and return a TaskResult.
-
-    TODO: Wire this to Hermes agent capabilities.  For now returns a
-    placeholder result so the approval pipeline can be tested end-to-end.
-    """
-    # TODO: Integrate with Hermes agent loop:
-    #   1. Read task.payload for instructions / document references
-    #   2. Invoke Hermes agent (or a subagent) to do the work
-    #   3. Capture the agent's output
-    #   4. Package it into a TaskResult
-    logger.info("execute: task %s — stub execution (no agent wired yet)", task.id)
-    return TaskResult(
-        task_id=task.id,
-        worker_id=worker_id,
-        output={"note": "Stub execution — agent integration pending"},
-        status=TaskStatus.PENDING_REVIEW,
-    )
+    ok = await openclaw.delegate_task(task, target.agent_id)
+    if ok:
+        task.status = TaskStatus.ASSIGNED
+        task.assigned_agent = target.agent_id
+        logger.info("delegate: task %s assigned to agent %s", task.id, target.agent_id)
+    else:
+        logger.warning("delegate: failed to assign task %s to agent %s",
+                        task.id, target.agent_id)
+    return ok
 
 
-async def route_result(
-    result: TaskResult,
-    source_queue: QueueAdapter,
+async def collect_and_route_results(
+    openclaw: OpenClawAdapter,
     approval_router: Optional[ApprovalRouter],
+    orchestrator_id: str,
     *,
     approval_only: bool = True,
-) -> bool:
-    """Route a task result to approval and/or back to the source queue.
+) -> int:
+    """Collect completed results from OpenClaw agents and route to approval.
 
-    When *approval_only* is True (the testing default), results are sent
-    to the approval router and NEVER marked as accepted automatically.
+    Returns the number of results processed.
     """
-    if approval_only:
-        result.status = TaskStatus.PENDING_REVIEW
+    results = await openclaw.collect_results()
+    if not results:
+        return 0
 
-    success = True
+    logger.info("collect: %d result(s) from OpenClaw agents", len(results))
+    processed = 0
 
-    # Submit to approval pipeline if available.
-    if approval_router is not None:
+    for result in results:
+        result.orchestrator_id = orchestrator_id
+
+        # Enforce approval-only mode.
+        if approval_only:
+            result.status = TaskStatus.PENDING_REVIEW
+
+        # Route to approval pipeline.
+        if approval_router is not None:
+            try:
+                ok = await approval_router.submit_for_review(result)
+                if ok:
+                    logger.info("route: task %s submitted for review", result.task_id)
+                else:
+                    logger.warning("route: failed to submit task %s for review", result.task_id)
+            except Exception as exc:
+                logger.error("route: error submitting task %s — %s", result.task_id, exc)
+        else:
+            logger.warning(
+                "route: no approval router — task %s result logged but not routed",
+                result.task_id,
+            )
+
+        # Acknowledge collection so OpenClaw doesn't return it again.
         try:
-            ok = await approval_router.submit_for_review(result)
-            if ok:
-                logger.info("route: task %s submitted for review", result.task_id)
-            else:
-                logger.warning("route: failed to submit task %s for review", result.task_id)
-                success = False
+            await openclaw.acknowledge_result(result.task_id)
         except Exception as exc:
-            logger.error("route: error submitting task %s for review — %s",
-                         result.task_id, exc)
-            success = False
-    else:
-        logger.warning(
-            "route: no approval router configured — task %s result logged but not routed",
-            result.task_id,
-        )
+            logger.error("route: error acknowledging result %s — %s", result.task_id, exc)
 
-    # Report back to source queue (sets status so the task isn't re-polled).
-    try:
-        await source_queue.report(result)
-    except Exception as exc:
-        logger.error("route: error reporting result for task %s — %s",
-                     result.task_id, exc)
-        success = False
+        processed += 1
 
-    return success
+    return processed

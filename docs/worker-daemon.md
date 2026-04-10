@@ -1,42 +1,48 @@
-# Worker Daemon
+# Orchestrator Daemon
 
 Background supervisor for the Lawyer Incorporated / AI paralegal stack.
-Runs alongside the Hermes gateway as a pull-model worker: wakes on heartbeat,
-polls for work, claims tasks, executes them, and routes results to
-approval/review.
+Hermes is the **orchestrator** — it runs a heartbeat loop alongside the
+gateway, polls Mission Control for tasks, delegates work to OpenClaw agents,
+collects their results, and routes everything through approval/review.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Railway Service (Hermes)                                    │
-│                                                              │
-│  ┌────────────────────┐   ┌────────────────────────────┐     │
-│  │  Hermes Gateway    │   │  Worker Daemon (thread)    │     │
-│  │  (Telegram bot,    │   │                            │     │
-│  │   messaging,       │   │  heartbeat → health check  │     │
-│  │   agent loop)      │   │           → poll queues    │     │
-│  │                    │   │           → claim task     │     │
-│  │                    │   │           → execute        │     │
-│  │                    │   │           → route to       │     │
-│  │                    │   │             approval       │     │
-│  └────────────────────┘   └─────────┬──────────────────┘     │
-│                                     │                        │
-└─────────────────────────────────────┼────────────────────────┘
-                                      │
-            ┌─────────────────────────┼─────────────────────┐
-            ▼                         ▼                     ▼
-  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-  │  OpenClaw        │  │  Mission Control │  │  FirmVault       │
-  │  Gateway         │  │  (TODO)          │  │  (TODO)          │
-  │  (Render)        │  │                  │  │                  │
-  └──────────────────┘  └──────────────────┘  └──────────────────┘
+                     ┌──────────────────────────────────────────┐
+                     │  Railway Service (Hermes = Orchestrator) │
+                     │                                          │
+                     │  ┌──────────────┐  ┌──────────────────┐  │
+                     │  │ Hermes       │  │ Orchestrator     │  │
+                     │  │ Gateway      │  │ Daemon (thread)  │  │
+                     │  │ (Telegram,   │  │                  │  │
+                     │  │  messaging)  │  │ health check     │  │
+                     │  │              │  │ poll tasks       │  │
+                     │  │              │  │ delegate → agents│  │
+                     │  │              │  │ collect results  │  │
+                     │  │              │  │ route → approval │  │
+                     │  └──────────────┘  └────────┬─────────┘  │
+                     │                             │            │
+                     └─────────────────────────────┼────────────┘
+                                                   │
+                  ┌────────────────────────────────┼──────────────────┐
+                  │                                │                  │
+                  ▼                                ▼                  ▼
+   ┌───────────────────────┐      ┌──────────────────┐  ┌──────────────────┐
+   │  OpenClaw Gateway     │      │  Mission Control │  │  FirmVault       │
+   │  (Render)             │      │  (TODO)          │  │  (TODO)          │
+   │                       │      │  task queue +    │  │  document store  │
+   │  ┌─────┐ ┌─────┐     │      │  approval queue  │  │                  │
+   │  │Agent│ │Agent│ ... │      └──────────────────┘  └──────────────────┘
+   │  │  1  │ │  2  │     │
+   │  └─────┘ └─────┘     │
+   │  (own heartbeat)      │
+   └───────────────────────┘
 ```
 
-**One OpenClaw, many specialized agents.** Each Railway service runs one
-Hermes instance with the daemon enabled.  The daemon polls the OpenClaw
-gateway (and later Mission Control) for tasks assigned to this agent's
-specialization.
+**One Hermes orchestrator, many OpenClaw agents.**  Hermes delegates work
+to OpenClaw agents via the gateway.  OpenClaw already has its own heartbeat
+for agent liveness — Hermes doesn't heartbeat individual agents, it just
+queries their status and dispatches work.
 
 ## How it starts
 
@@ -172,11 +178,12 @@ are available:
 | Adapter | Status | What's needed |
 |---|---|---|
 | `OpenClawAdapter.health_check()` | **Working** | Probes /health, /api/health, / |
-| `OpenClawAdapter.poll/claim/report` | **Stub** | Real queue API endpoints on OpenClaw |
+| `OpenClawAdapter.list_agents()` | **Stub** | Agent listing endpoint on OpenClaw |
+| `OpenClawAdapter.delegate_task()` | **Stub** | Task assignment endpoint on OpenClaw |
+| `OpenClawAdapter.collect_results()` | **Stub** | Result collection endpoint on OpenClaw |
 | `MissionControlAdapter` (all methods) | **Stub** | Mission Control API definition |
 | `FirmVaultAdapter` (all methods) | **Stub** | FirmVault API definition |
-| `execute_task()` in `poller.py` | **Stub** | Wire to Hermes agent capabilities |
 
 Each stub is marked with a `# TODO:` comment showing the expected API call
 shape.  The daemon runs safely with stubs — it just no-ops on each tick
-(polls, finds nothing, sleeps).
+(health checks, finds no tasks, sleeps).
