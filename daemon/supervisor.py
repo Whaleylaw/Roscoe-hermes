@@ -21,7 +21,7 @@ import time
 from typing import Optional
 
 from daemon.adapters.base import ApprovalRouter, HealthCheckable, TaskSource
-from daemon.adapters.firmvault import FirmVaultAdapter
+from daemon.adapters.firmvault_pipeline import FirmVaultAdapter
 from daemon.adapters.gsd import GSDAdapter
 from daemon.adapters.mission_control import MissionControlAdapter
 from daemon.adapters.openclaw import OpenClawAdapter
@@ -56,10 +56,8 @@ class Supervisor:
             config.mission_control_url,
             timeout=config.health_check_timeout_seconds,
         )
-        self._firmvault = FirmVaultAdapter(
-            config.firmvault_url,
-            timeout=config.health_check_timeout_seconds,
-        )
+        # Lane 1: FirmVault case pipeline (engine → MC → OpenClaw → vault)
+        self._firmvault = FirmVaultAdapter()
 
         # GSD adapter — drives plan lifecycle from project workspaces.
         self._gsd = GSDAdapter()
@@ -155,12 +153,26 @@ class Supervisor:
     # ── Single tick ───────────────────────────────────────────────────
 
     async def _tick(self) -> None:
-        """One heartbeat cycle: health → poll → delegate → collect → route."""
+        """One heartbeat cycle.
+
+        Two lanes run in parallel:
+          Lane 1: FirmVault case pipeline (engine → MC → OpenClaw → vault)
+          Lane 2: GSD ad-hoc projects (poll → dispatch → collect)
+        """
         logger.info(
             "heartbeat tick=%d orchestrator=%s",
             self._tick_count, self.config.worker_id,
         )
 
+        # ── Lane 1: FirmVault case pipeline ──────────────────────────
+        # Runs the deterministic engine + MC bridge. Self-contained loop.
+        if self._firmvault.configured:
+            try:
+                await self._firmvault.tick()
+            except Exception as exc:
+                logger.error("lane1: FirmVault tick error — %s", exc, exc_info=True)
+
+        # ── Lane 2: GSD + OpenClaw orchestration ────────────────────
         # 1. Health check upstream services.
         statuses = await check_all(self._health_targets)
         all_healthy = log_health(statuses)
