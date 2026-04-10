@@ -192,7 +192,7 @@ class Supervisor:
         openclaw_tasks = [t for t in tasks if t.metadata.get("source") != "gsd"]
 
         # 3a. GSD tasks: dispatch via GSD dispatcher (which routes to
-        #     Paperclip, OpenClaw relay, or Hermes directly).
+        #     OpenClaw relay or Hermes directly).
         if gsd_tasks:
             await self._dispatch_gsd_tasks(gsd_tasks)
 
@@ -218,7 +218,7 @@ class Supervisor:
 
         GSD tasks carry their full task definition in metadata['gsd_task'].
         We group by project and dispatch via the bridge, which routes each
-        task to the correct platform (Paperclip, OpenClaw relay, or Hermes).
+        task to the correct platform (OpenClaw relay or Hermes).
         """
         # Group by project
         by_project: dict[str, list] = {}
