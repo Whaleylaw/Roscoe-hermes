@@ -66,6 +66,19 @@ class HookRegistry:
         except Exception as e:
             print(f"[hooks] Could not load built-in boot-md hook: {e}", flush=True)
 
+        try:
+            from gateway.builtin_hooks.worker_daemon import handle as worker_daemon_handle
+
+            self._handlers.setdefault("gateway:startup", []).append(worker_daemon_handle)
+            self._loaded_hooks.append({
+                "name": "worker-daemon",
+                "description": "Start the background worker daemon (when DAEMON_ENABLED=true)",
+                "events": ["gateway:startup"],
+                "path": "(builtin)",
+            })
+        except Exception as e:
+            print(f"[hooks] Could not load built-in worker-daemon hook: {e}", flush=True)
+
     def discover_and_load(self) -> None:
         """
         Scan the hooks directory for hook directories and load their handlers.
