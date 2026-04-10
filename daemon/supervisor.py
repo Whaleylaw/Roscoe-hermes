@@ -22,6 +22,7 @@ from typing import Optional
 
 from daemon.adapters.base import ApprovalRouter, HealthCheckable, TaskSource
 from daemon.adapters.firmvault import FirmVaultAdapter
+from daemon.adapters.gsd import GSDAdapter
 from daemon.adapters.mission_control import MissionControlAdapter
 from daemon.adapters.openclaw import OpenClawAdapter
 from daemon.approval import LocalApprovalRouter
@@ -60,17 +61,24 @@ class Supervisor:
             timeout=config.health_check_timeout_seconds,
         )
 
+        # GSD adapter — drives plan lifecycle from project workspaces.
+        self._gsd = GSDAdapter()
+
         # Services to health-check (skip unconfigured ones to avoid noise).
         self._health_targets: list[HealthCheckable] = [self._openclaw]
         if self._mission_control.configured:
             self._health_targets.append(self._mission_control)
         if self._firmvault.configured:
             self._health_targets.append(self._firmvault)
+        if self._gsd.configured:
+            self._health_targets.append(self._gsd)
 
         # Task sources to poll for orchestration work.
         self._task_sources: list[TaskSource] = []
         if self._mission_control.configured:
             self._task_sources.append(self._mission_control)
+        if self._gsd.configured:
+            self._task_sources.append(self._gsd)
 
         # Approval router: prefer Mission Control if configured, otherwise
         # fall back to local logging-based router.
@@ -164,11 +172,20 @@ class Supervisor:
             logger.warning("heartbeat: OpenClaw unhealthy — skipping orchestration")
             return
 
-        # 2. Poll task sources (Mission Control) for work to orchestrate.
+        # 2. Poll task sources (Mission Control, GSD) for work to orchestrate.
         tasks = await poll_for_tasks(self._task_sources)
 
-        # 3. Delegate tasks to available OpenClaw agents.
-        for task in tasks:
+        # 3. Route tasks — GSD tasks dispatch through GSD, others through OpenClaw.
+        gsd_tasks = [t for t in tasks if t.metadata.get("source") == "gsd"]
+        openclaw_tasks = [t for t in tasks if t.metadata.get("source") != "gsd"]
+
+        # 3a. GSD tasks: dispatch via GSD dispatcher (which routes to
+        #     Paperclip, OpenClaw relay, or Hermes directly).
+        if gsd_tasks:
+            await self._dispatch_gsd_tasks(gsd_tasks)
+
+        # 3b. Non-GSD tasks: delegate to OpenClaw agents directly.
+        for task in openclaw_tasks:
             await delegate_task(task, self._openclaw, self.config.worker_id)
 
         # 4. Collect completed results from OpenClaw agents.
@@ -180,6 +197,75 @@ class Supervisor:
         )
         if processed > 0:
             logger.info("heartbeat: processed %d result(s) from OpenClaw agents", processed)
+
+
+    # ── GSD dispatch ────────────────────────────────────────────────────
+
+    async def _dispatch_gsd_tasks(self, tasks: list) -> None:
+        """Dispatch GSD-sourced tasks via the GSD bridge.
+
+        GSD tasks carry their full task definition in metadata['gsd_task'].
+        We group by project and dispatch via the bridge, which routes each
+        task to the correct platform (Paperclip, OpenClaw relay, or Hermes).
+        """
+        # Group by project
+        by_project: dict[str, list] = {}
+        for task in tasks:
+            project = task.metadata.get("project", "unknown")
+            by_project.setdefault(project, []).append(task)
+
+        for project, project_tasks in by_project.items():
+            # Separate approval tasks from dispatch tasks
+            approval_tasks = [t for t in project_tasks if t.status == TaskStatus.PENDING_REVIEW]
+            dispatch_tasks = [t for t in project_tasks if t.status != TaskStatus.PENDING_REVIEW]
+
+            # Handle approval notifications
+            for task in approval_tasks:
+                gsd_task = task.metadata.get("gsd_task", {})
+                logger.warning(
+                    "GSD APPROVAL NEEDED: project=%s task=%s title='%s' — "
+                    "awaiting Aaron's approval",
+                    project, gsd_task.get("id"), gsd_task.get("title"),
+                )
+                # TODO: Send Telegram notification to Aaron
+                # This will be wired once we have the gateway's send_message hook
+
+            # Dispatch ready tasks via GSD bridge
+            if dispatch_tasks:
+                wave = dispatch_tasks[0].metadata.get("wave", 1)
+                gsd_payloads = [t.metadata.get("gsd_task", {}) for t in dispatch_tasks]
+
+                try:
+                    result = self._gsd._run_gsd_script("dispatch_wave", {
+                        "project": project,
+                        "wave": wave,
+                        "tasks": gsd_payloads,
+                        "dryRun": False,
+                    })
+
+                    if result.get("ok"):
+                        logger.info(
+                            "gsd: dispatched wave %d for project %s — %d tasks",
+                            wave, project, len(dispatch_tasks),
+                        )
+                        # Update statuses
+                        for task in dispatch_tasks:
+                            gsd_task_id = task.metadata.get("gsd_task", {}).get("id")
+                            if gsd_task_id:
+                                await self._gsd.update_task_status(
+                                    f"{project}:{gsd_task_id}",
+                                    TaskStatus.ASSIGNED,
+                                )
+                    else:
+                        logger.error(
+                            "gsd: dispatch failed for project %s wave %d — %s",
+                            project, wave, result.get("error"),
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "gsd: error dispatching wave %d for project %s — %s",
+                        wave, project, exc,
+                    )
 
 
 # ── Module-level start/stop helpers ──────────────────────────────────
