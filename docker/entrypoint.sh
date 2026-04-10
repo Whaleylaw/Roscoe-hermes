@@ -14,6 +14,26 @@ INSTALL_DIR="/opt/hermes"
 # ephemeral and shared across profiles.  See issue #4426.
 mkdir -p "$HERMES_HOME"/{cron,sessions,logs,hooks,memories,skills,skins,plans,workspace,home}
 
+# Ensure ~/.hermes symlinks to the persistent volume so that Hermes
+# resolves its data directory regardless of how it discovers $HOME.
+# The container filesystem is ephemeral — this must run every boot.
+HERMES_LINK="$HOME/.hermes"
+if [ ! -e "$HERMES_LINK" ]; then
+    ln -s "$HERMES_HOME" "$HERMES_LINK"
+fi
+
+# Ensure ~/.honcho config survives rebuilds by symlinking from the volume.
+# The entrypoint creates a minimal config if one doesn't exist yet;
+# the API key is read from $HERMES_HOME/.env (HONCHO_API_KEY).
+HONCHO_DIR="$HERMES_HOME/.honcho"
+mkdir -p "$HONCHO_DIR"
+if [ ! -f "$HONCHO_DIR/config.json" ]; then
+    echo '{"enabled": true}' > "$HONCHO_DIR/config.json"
+fi
+if [ ! -e "$HOME/.honcho" ]; then
+    ln -s "$HONCHO_DIR" "$HOME/.honcho"
+fi
+
 # .env
 if [ ! -f "$HERMES_HOME/.env" ]; then
     cp "$INSTALL_DIR/.env.example" "$HERMES_HOME/.env"
