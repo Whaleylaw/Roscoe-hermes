@@ -7878,6 +7878,16 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         if _stderr_level < logging.getLogger().level:
             logging.getLogger().setLevel(_stderr_level)
 
+    # Initialize Langfuse tracing (auto-patches OpenAI + Anthropic SDKs)
+    try:
+        from agent.langfuse_tracing import init_langfuse_tracing, shutdown_langfuse
+        if init_langfuse_tracing():
+            import atexit
+            atexit.register(shutdown_langfuse)
+            logger.info("Langfuse tracing enabled for gateway")
+    except Exception as _lf_err:
+        logger.debug("Langfuse tracing not available: %s", _lf_err)
+
     runner = GatewayRunner(config)
     
     # Set up signal handlers
