@@ -40,7 +40,7 @@ _CONTEXT_THREAT_PATTERNS = [
     (r'disregard\s+(your|all|any)\s+(instructions|rules|guidelines)', "disregard_rules"),
     (r'act\s+as\s+(if|though)\s+you\s+(have\s+no|don\'t\s+have)\s+(restrictions|limits|rules)', "bypass_restrictions"),
     (r'<!--[^>]*(?:ignore|override|system|secret|hidden)[^>]*-->', "html_comment_injection"),
-    (r'<\s*div\s+style\s*=\s*["\'][\s\S]*?display\s*:\s*none', "hidden_div"),
+    (r'<\s*div\s+style\s*=\s*["\'].*display\s*:\s*none', "hidden_div"),
     (r'translate\s+.*\s+into\s+.*\s+and\s+(execute|run|eval)', "translate_execute"),
     (r'curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)', "exfil_curl"),
     (r'cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass)', "read_secrets"),
@@ -537,7 +537,7 @@ def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
     (True, {}, "") to err on the side of showing the skill.
     """
     try:
-        raw = skill_file.read_text(encoding="utf-8")
+        raw = skill_file.read_text(encoding="utf-8")[:2000]
         frontmatter, _ = parse_frontmatter(raw)
 
         if not skill_matches_platform(frontmatter):
@@ -545,8 +545,19 @@ def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
 
         return True, frontmatter, extract_skill_description(frontmatter)
     except Exception as e:
-        logger.warning("Failed to parse skill file %s: %s", skill_file, e)
+        logger.debug("Failed to parse skill file %s: %s", skill_file, e)
         return True, {}, ""
+
+
+def _read_skill_conditions(skill_file: Path) -> dict:
+    """Extract conditional activation fields from SKILL.md frontmatter."""
+    try:
+        raw = skill_file.read_text(encoding="utf-8")[:2000]
+        frontmatter, _ = parse_frontmatter(raw)
+        return extract_skill_conditions(frontmatter)
+    except Exception as e:
+        logger.debug("Failed to read skill conditions from %s: %s", skill_file, e)
+        return {}
 
 
 def _skill_should_show(
@@ -597,7 +608,23 @@ def build_skills_system_prompt(
     scanned alongside the local ``~/.hermes/skills/`` directory.  External dirs
     are read-only — they appear in the index but new skills are always created
     in the local dir.  Local skills take precedence when names collide.
+
+    When the semantic-skills plugin is active (HERMES_SEMANTIC_SKILLS_ACTIVE=true),
+    returns a slim prompt instead of the full index — the plugin handles
+    skill discovery via vector search in the pre_llm_call hook.
     """
+    # If semantic skills plugin is handling discovery, return slim prompt
+    if os.environ.get("HERMES_SEMANTIC_SKILLS_ACTIVE", "").lower() in ("true", "1"):
+        return (
+            "## Skills (semantic search active)\n"
+            "Skills are discovered automatically via semantic search each turn. "
+            "Relevant skills are injected as context with your message. "
+            "When a skill is surfaced, load it with skill_view(name) and follow its instructions. "
+            "If a skill has issues, fix it with skill_manage(action='patch').\n"
+            "After difficult/iterative tasks, offer to save as a skill. "
+            "If a skill you loaded was missing steps, had wrong commands, or needed "
+            "pitfalls you discovered, update it before finishing."
+        )
     skills_dir = get_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
 
@@ -607,10 +634,9 @@ def build_skills_system_prompt(
     # ── Layer 1: in-process LRU cache ─────────────────────────────────
     # Include the resolved platform so per-platform disabled-skill lists
     # produce distinct cache entries (gateway serves multiple platforms).
-    from gateway.session_context import get_session_env
     _platform_hint = (
         os.environ.get("HERMES_PLATFORM")
-        or get_session_env("HERMES_SESSION_PLATFORM")
+        or os.environ.get("HERMES_SESSION_PLATFORM")
         or ""
     )
     cache_key = (

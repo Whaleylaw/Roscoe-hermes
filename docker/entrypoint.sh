@@ -120,4 +120,9 @@ fi
 # Ensure projects directory exists for GSD ad-hoc projects
 mkdir -p "$HERMES_HOME/projects"
 
+# Install plugin dependencies (semantic-skills needs fastembed)
+if [ -d "$HERMES_HOME/plugins/semantic-skills" ]; then
+    pip install --quiet --no-cache-dir fastembed 2>/dev/null || true
+fi
+
 exec hermes "$@"
