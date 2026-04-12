@@ -1,0 +1,9 @@
+name: semantic-skills
+version: "1.0.0"
+description: >
+  Replaces the static skills index with semantic vector search.
+  Embeds all skill descriptions using fastembed (BAAI/bge-small-en-v1.5)
+  and surfaces only relevant skills per turn via pre_llm_call hook.
+author: Roscoe
+provides_hooks:
+  - pre_llm_call

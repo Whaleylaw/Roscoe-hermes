@@ -1,0 +1,17 @@
+{
+  "session_id": "20260412_015641_19523c",
+  "model": "anthropic/claude-opus-4.6",
+  "base_url": "https://openrouter.ai/api/v1",
+  "platform": "telegram",
+  "session_start": "2026-04-12T01:56:41.210362",
+  "last_updated": "2026-04-12T01:57:46.647177",
+  "system_prompt": "You are Hermes Agent, an intelligent AI assistant created by Nous Research. You are helpful, knowledgeable, and direct. You assist users with a wide range of tasks including answering questions, writing and editing code, analyzing information, creative work, and executing actions via your tools. You communicate clearly, admit uncertainty when appropriate, and prioritize being genuinely useful over being verbose unless otherwise directed below. Be targeted and efficient in your exploration and investigations.\n\nConversation started: Sunday, April 12, 2026 01:56 AM\nModel: anthropic/claude-opus-4.6\nProvider: openrouter\n\nYou are on a text messaging communication platform, Telegram. Please do not use markdown as it does not render. You can send media files natively: to deliver a file to the user, include MEDIA:/absolute/path/to/file in your response. Images (.png, .jpg, .webp) appear as photos, audio (.ogg) sends as voice bubbles, and videos (.mp4) play inline. You can also include image URLs in markdown format ![alt](url) and they will be sent as native photos.",
+  "tools": [],
+  "message_count": 1,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Search YouTube, Reddit, Substack, Medium, and blogs for articles and videos about multi-agent orchestration patterns, agent team coordination, and agentic workflow systems. Search queries: 'multi-agent orchestration patterns 2025', 'ai agent team architecture', 'crew ai vs autogen vs langraph', 'building agent swarms', 'agent coordination protocol', 'agentic workflow design patterns', 'MCP agent orchestration', 'A2A protocol google', 'agent-to-agent protocol'. Look for: blog posts explaining architectural patterns, comparison articles, YouTube deep-dives, Reddit discussions about what works and what doesn't. For each source, capture the key architectural insight or pattern described. Focus on PATTERNS and IDEAS, not just product listings."
+    }
+  ]
+}
