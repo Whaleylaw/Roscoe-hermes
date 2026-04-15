@@ -232,7 +232,7 @@ from gateway.session import (
     SessionContext,
     build_session_context,
     build_session_context_prompt,
-    build_session_key,
+    resolve_session_key,
 )
 from gateway.delivery import DeliveryRouter
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
@@ -769,11 +769,7 @@ class GatewayRunner:
             except Exception:
                 pass
         config = getattr(self, "config", None)
-        return build_session_key(
-            source,
-            group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
-        )
+        return resolve_session_key(source, config=config)
 
     def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
         from agent.smart_model_routing import resolve_turn_route

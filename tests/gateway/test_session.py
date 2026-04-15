@@ -4,7 +4,13 @@ import json
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
+from gateway.config import (
+    Platform,
+    HomeChannel,
+    GatewayConfig,
+    PlatformConfig,
+    SessionFunnelConfig,
+)
 from gateway.session import (
     SessionSource,
     SessionStore,
@@ -606,6 +612,30 @@ class TestWhatsAppDMSessionKeyConsistency:
         cfg = GatewayConfig(group_sessions_per_user=False)
 
         assert resolve_session_key(source, config=cfg) == "agent:main:discord:group:guild-123"
+
+    def test_resolve_session_key_collapses_to_main_when_funnel_enabled(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="guild-123",
+            chat_type="group",
+            user_id="alice",
+            thread_id="thread-1",
+        )
+        cfg = GatewayConfig(
+            session_funnel=SessionFunnelConfig(enabled=True, strategy="single-agent-main")
+        )
+
+        assert resolve_session_key(source, config=cfg) == "agent:main:main"
+
+    def test_store_uses_main_key_when_funnel_enabled(self, store):
+        store.config.session_funnel = SessionFunnelConfig(enabled=True, strategy="single-agent-main")
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="99",
+            chat_type="dm",
+        )
+
+        assert store._generate_session_key(source) == "agent:main:main"
 
     def test_store_creates_distinct_group_sessions_per_user(self, store):
         first = SessionSource(

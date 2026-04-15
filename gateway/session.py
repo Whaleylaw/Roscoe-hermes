@@ -493,9 +493,16 @@ def resolve_session_key(
 ) -> str:
     """Resolve the effective session key for a source.
 
-    This wrapper is intentionally behavior-preserving for now. It exists so
-    session key policy can evolve behind a single abstraction point.
+    When session funneling is enabled, all inbound traffic converges on
+    the agent main session key.
     """
+    funnel_cfg = getattr(config, "session_funnel", None)
+    if funnel_cfg and getattr(funnel_cfg, "enabled", False):
+        strategy = str(getattr(funnel_cfg, "strategy", "single-agent-main") or "single-agent-main")
+        if strategy == "single-agent-main":
+            return "agent:main:main"
+        logger.warning("Unknown session funnel strategy '%s'; falling back to build_session_key", strategy)
+
     if group_sessions_per_user is None:
         group_sessions_per_user = getattr(config, "group_sessions_per_user", True)
     if thread_sessions_per_user is None:
