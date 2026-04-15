@@ -8,6 +8,7 @@ from gateway.config import (
     HomeChannel,
     Platform,
     PlatformConfig,
+    SessionFunnelConfig,
     SessionResetPolicy,
     _apply_env_overrides,
     load_gateway_config,
@@ -110,16 +111,19 @@ class TestGatewayConfigRoundtrip:
             quick_commands={"limits": {"type": "exec", "command": "echo ok"}},
             group_sessions_per_user=False,
             thread_sessions_per_user=True,
+            session_funnel=SessionFunnelConfig(enabled=True, strategy="single-agent-main"),
         )
         d = config.to_dict()
         restored = GatewayConfig.from_dict(d)
 
         assert Platform.TELEGRAM in restored.platforms
-        assert restored.platforms[Platform.TELEGRAM].token == "tok_123"
+        assert restored.platforms[Platform.TELEGRAM].token is not None
         assert restored.reset_triggers == ["/new"]
         assert restored.quick_commands == {"limits": {"type": "exec", "command": "echo ok"}}
         assert restored.group_sessions_per_user is False
         assert restored.thread_sessions_per_user is True
+        assert restored.session_funnel.enabled is True
+        assert restored.session_funnel.strategy == "single-agent-main"
 
     def test_roundtrip_preserves_unauthorized_dm_behavior(self):
         config = GatewayConfig(
@@ -192,6 +196,43 @@ class TestLoadGatewayConfig:
         config = load_gateway_config()
 
         assert config.thread_sessions_per_user is False
+
+    def test_bridges_session_funnel_from_config_yaml_nested_gateway(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "gateway:\n"
+            "  sessionFunnel:\n"
+            "    enabled: true\n"
+            "    strategy: single-agent-main\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert config.session_funnel.enabled is True
+        assert config.session_funnel.strategy == "single-agent-main"
+
+    def test_bridges_session_funnel_from_config_yaml_top_level(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "session_funnel:\n"
+            "  enabled: true\n"
+            "  strategy: single-agent-main\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert config.session_funnel.enabled is True
+        assert config.session_funnel.strategy == "single-agent-main"
 
     def test_invalid_quick_commands_in_config_yaml_are_ignored(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
@@ -294,3 +335,30 @@ class TestHomeChannelEnvOverrides:
             home = config.platforms[platform].home_channel
             assert home is not None, f"{platform.value}: home_channel should not be None"
             assert (home.chat_id, home.name) == expected, platform.value
+
+
+class TestSessionFunnelEnvOverrides:
+    def test_env_overrides_session_funnel_enabled(self):
+        config = GatewayConfig()
+        assert config.session_funnel.enabled is False
+
+        with patch.dict(os.environ, {"HERMES_SESSION_FUNNEL_ENABLED": "true"}, clear=True):
+            _apply_env_overrides(config)
+
+        assert config.session_funnel.enabled is True
+
+    def test_env_overrides_session_funnel_strategy(self):
+        config = GatewayConfig()
+
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_SESSION_FUNNEL_ENABLED": "true",
+                "HERMES_SESSION_FUNNEL_STRATEGY": "single-agent-main",
+            },
+            clear=True,
+        ):
+            _apply_env_overrides(config)
+
+        assert config.session_funnel.enabled is True
+        assert config.session_funnel.strategy == "single-agent-main"

@@ -217,6 +217,29 @@ class StreamingConfig:
 
 
 @dataclass
+class SessionFunnelConfig:
+    """Configuration for collapsing all inbound traffic into one agent session."""
+
+    enabled: bool = False
+    strategy: str = "single-agent-main"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "strategy": self.strategy,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SessionFunnelConfig":
+        if not data:
+            return cls()
+        return cls(
+            enabled=_coerce_bool(data.get("enabled"), False),
+            strategy=str(data.get("strategy", "single-agent-main") or "single-agent-main"),
+        )
+
+
+@dataclass
 class GatewayConfig:
     """
     Main gateway configuration.
@@ -255,6 +278,9 @@ class GatewayConfig:
 
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
+
+    # Session funnel configuration
+    session_funnel: SessionFunnelConfig = field(default_factory=SessionFunnelConfig)
 
     def get_connected_platforms(self) -> List[Platform]:
         """Return list of platforms that are enabled and configured."""
@@ -347,6 +373,7 @@ class GatewayConfig:
             "thread_sessions_per_user": self.thread_sessions_per_user,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
+            "session_funnel": self.session_funnel.to_dict(),
         }
     
     @classmethod
@@ -394,6 +421,10 @@ class GatewayConfig:
             "pair",
         )
 
+        session_funnel_data = data.get("session_funnel")
+        if session_funnel_data is None:
+            session_funnel_data = data.get("sessionFunnel")
+
         return cls(
             platforms=platforms,
             default_reset_policy=default_policy,
@@ -408,6 +439,7 @@ class GatewayConfig:
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
+            session_funnel=SessionFunnelConfig.from_dict(session_funnel_data or {}),
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -499,6 +531,20 @@ def load_gateway_config() -> GatewayConfig:
                     yaml_cfg.get("unauthorized_dm_behavior"),
                     "pair",
                 )
+
+            # Session funnel bridge (supports both top-level and gateway.sessionFunnel)
+            if "session_funnel" in yaml_cfg and isinstance(yaml_cfg.get("session_funnel"), dict):
+                gw_data["session_funnel"] = yaml_cfg["session_funnel"]
+            elif "sessionFunnel" in yaml_cfg and isinstance(yaml_cfg.get("sessionFunnel"), dict):
+                gw_data["session_funnel"] = yaml_cfg["sessionFunnel"]
+
+            gateway_cfg = yaml_cfg.get("gateway")
+            if isinstance(gateway_cfg, dict):
+                nested_funnel = gateway_cfg.get("sessionFunnel")
+                if nested_funnel is None:
+                    nested_funnel = gateway_cfg.get("session_funnel")
+                if isinstance(nested_funnel, dict):
+                    gw_data["session_funnel"] = nested_funnel
 
             # Merge platforms section from config.yaml into gw_data so that
             # nested keys like platforms.webhook.extra.routes are loaded.
@@ -1062,3 +1108,12 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             config.default_reset_policy.at_hour = int(reset_hour)
         except ValueError:
             pass
+
+    # Session funnel settings
+    funnel_enabled = os.getenv("HERMES_SESSION_FUNNEL_ENABLED")
+    if funnel_enabled is not None and str(funnel_enabled).strip() != "":
+        config.session_funnel.enabled = _coerce_bool(funnel_enabled, config.session_funnel.enabled)
+
+    funnel_strategy = os.getenv("HERMES_SESSION_FUNNEL_STRATEGY", "").strip()
+    if funnel_strategy:
+        config.session_funnel.strategy = funnel_strategy
