@@ -485,6 +485,29 @@ def build_session_key(
     return ":".join(key_parts)
 
 
+def resolve_session_key(
+    source: SessionSource,
+    config: Optional[GatewayConfig] = None,
+    group_sessions_per_user: Optional[bool] = None,
+    thread_sessions_per_user: Optional[bool] = None,
+) -> str:
+    """Resolve the effective session key for a source.
+
+    This wrapper is intentionally behavior-preserving for now. It exists so
+    session key policy can evolve behind a single abstraction point.
+    """
+    if group_sessions_per_user is None:
+        group_sessions_per_user = getattr(config, "group_sessions_per_user", True)
+    if thread_sessions_per_user is None:
+        thread_sessions_per_user = getattr(config, "thread_sessions_per_user", False)
+
+    return build_session_key(
+        source,
+        group_sessions_per_user=group_sessions_per_user,
+        thread_sessions_per_user=thread_sessions_per_user,
+    )
+
+
 class SessionStore:
     """
     Manages session storage and retrieval.

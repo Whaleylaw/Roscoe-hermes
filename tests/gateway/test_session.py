@@ -11,6 +11,7 @@ from gateway.session import (
     build_session_context,
     build_session_context_prompt,
     build_session_key,
+    resolve_session_key,
 )
 
 
@@ -584,6 +585,27 @@ class TestWhatsAppDMSessionKeyConsistency:
             user_name="Phone User",
         )
         assert store._generate_session_key(source) == build_session_key(source)
+
+    def test_resolve_session_key_matches_build_session_key_without_config(self):
+        source = SessionSource(
+            platform=Platform.WHATSAPP,
+            chat_id="15551234567@s.whatsapp.net",
+            chat_type="dm",
+            user_name="Phone User",
+        )
+
+        assert resolve_session_key(source) == build_session_key(source)
+
+    def test_resolve_session_key_honors_config_isolation_flags(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="guild-123",
+            chat_type="group",
+            user_id="alice",
+        )
+        cfg = GatewayConfig(group_sessions_per_user=False)
+
+        assert resolve_session_key(source, config=cfg) == "agent:main:discord:group:guild-123"
 
     def test_store_creates_distinct_group_sessions_per_user(self, store):
         first = SessionSource(
