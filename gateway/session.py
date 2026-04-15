@@ -586,11 +586,7 @@ class SessionStore:
     
     def _generate_session_key(self, source: SessionSource) -> str:
         """Generate a session key from a source."""
-        return build_session_key(
-            source,
-            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
-        )
+        return resolve_session_key(source, config=self.config)
     
     def _is_session_expired(self, entry: SessionEntry) -> bool:
         """Check if a session has expired based on its reset policy.
