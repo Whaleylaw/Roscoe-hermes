@@ -13,11 +13,56 @@ Usage:
 
 import logging
 import os
+from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
+LANGFUSE_REQUIRED_ENV = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
+LANGFUSE_OPTIONAL_ENV = ("LANGFUSE_BASE_URL",)
+OTEL_RECOMMENDED_ENV = (
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_SERVICE_NAME",
+)
+
 _langfuse_instance = None
 _langfuse_available = None
+
+
+def get_langfuse_readiness() -> Dict[str, Any]:
+    """Return Langfuse/OTel readiness details without exposing secret values."""
+    present_required = [k for k in LANGFUSE_REQUIRED_ENV if os.environ.get(k)]
+    missing_required = [k for k in LANGFUSE_REQUIRED_ENV if not os.environ.get(k)]
+    present_optional = [k for k in LANGFUSE_OPTIONAL_ENV if os.environ.get(k)]
+    present_otel = [k for k in OTEL_RECOMMENDED_ENV if os.environ.get(k)]
+    missing_otel = [k for k in OTEL_RECOMMENDED_ENV if not os.environ.get(k)]
+
+    enabled = len(missing_required) == 0
+
+    if enabled:
+        reason = "configured"
+    elif missing_required == ["LANGFUSE_PUBLIC_KEY"]:
+        reason = "missing_langfuse_public_key"
+    elif missing_required == ["LANGFUSE_SECRET_KEY"]:
+        reason = "missing_langfuse_secret_key"
+    else:
+        reason = "missing_langfuse_credentials"
+
+    return {
+        "enabled": enabled,
+        "reason": reason,
+        "langfuse": {
+            "present_required": present_required,
+            "missing_required": missing_required,
+            "present_optional": present_optional,
+        },
+        "otel": {
+            "present": present_otel,
+            "missing": missing_otel,
+            "ready": len(missing_otel) == 0,
+        },
+    }
 
 
 def is_langfuse_enabled() -> bool:
@@ -25,10 +70,7 @@ def is_langfuse_enabled() -> bool:
     global _langfuse_available
     if _langfuse_available is not None:
         return _langfuse_available
-    _langfuse_available = bool(
-        os.environ.get("LANGFUSE_SECRET_KEY")
-        and os.environ.get("LANGFUSE_PUBLIC_KEY")
-    )
+    _langfuse_available = get_langfuse_readiness()["enabled"]
     return _langfuse_available
 
 

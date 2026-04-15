@@ -7876,11 +7876,28 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
     # Initialize Langfuse tracing (auto-patches OpenAI + Anthropic SDKs)
     try:
-        from agent.langfuse_tracing import init_langfuse_tracing, shutdown_langfuse
-        if init_langfuse_tracing():
-            import atexit
-            atexit.register(shutdown_langfuse)
-            logger.info("Langfuse tracing enabled for gateway")
+        from agent.langfuse_tracing import (
+            init_langfuse_tracing,
+            shutdown_langfuse,
+            get_langfuse_readiness,
+        )
+
+        _lf_readiness = get_langfuse_readiness()
+        if _lf_readiness["enabled"]:
+            if init_langfuse_tracing():
+                import atexit
+                atexit.register(shutdown_langfuse)
+                logger.info(
+                    "Langfuse tracing enabled for gateway (otel_ready=%s, missing_otel=%s)",
+                    _lf_readiness["otel"]["ready"],
+                    _lf_readiness["otel"]["missing"],
+                )
+        else:
+            logger.info(
+                "Langfuse tracing disabled for gateway (reason=%s, missing=%s)",
+                _lf_readiness["reason"],
+                _lf_readiness["langfuse"]["missing_required"],
+            )
     except Exception as _lf_err:
         logger.debug("Langfuse tracing not available: %s", _lf_err)
 
