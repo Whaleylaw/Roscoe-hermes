@@ -563,6 +563,21 @@ class TestWhatsAppDMSessionKeyConsistency:
     """Regression: all session-key construction must go through build_session_key
     so DMs are isolated by chat_id across platforms."""
 
+    @pytest.mark.parametrize(
+        "source",
+        [
+            SessionSource(platform=Platform.TELEGRAM, chat_id="99", chat_type="dm"),
+            SessionSource(platform=Platform.SLACK, chat_id="C123", chat_type="channel"),
+            SessionSource(platform=Platform.DISCORD, chat_id="guild-1", chat_type="group", user_id="alice"),
+            SessionSource(platform=Platform.TELEGRAM, chat_id="-1001", chat_type="group", thread_id="42", user_id="alice"),
+        ],
+    )
+    def test_funnel_enabled_collapses_all_source_shapes_to_main(self, source):
+        cfg = GatewayConfig(
+            session_funnel=SessionFunnelConfig(enabled=True, strategy="single-agent-main")
+        )
+        assert resolve_session_key(source, config=cfg) == "agent:main:main"
+
     @pytest.fixture()
     def store(self, tmp_path):
         config = GatewayConfig()
@@ -636,6 +651,26 @@ class TestWhatsAppDMSessionKeyConsistency:
         )
 
         assert store._generate_session_key(source) == "agent:main:main"
+
+    def test_store_preserves_origin_metadata_when_funnel_enabled(self, store):
+        store.config.session_funnel = SessionFunnelConfig(enabled=True, strategy="single-agent-main")
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="-1002285219667",
+            chat_type="group",
+            thread_id="17585",
+            user_id="alice",
+            user_name="Alice",
+            chat_name="Ops",
+        )
+
+        entry = store.get_or_create_session(source)
+
+        assert entry.session_key == "agent:main:main"
+        assert entry.origin.chat_id == "-1002285219667"
+        assert entry.origin.thread_id == "17585"
+        assert entry.origin.chat_type == "group"
+        assert entry.origin.platform == Platform.TELEGRAM
 
     def test_store_creates_distinct_group_sessions_per_user(self, store):
         first = SessionSource(
