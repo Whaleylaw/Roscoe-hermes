@@ -218,6 +218,20 @@ hermes chat -q "/my-skill help me with the thing"
 
 The skill appears automatically — no registration needed. Drop it in `~/.hermes/skills/` and it's live.
 
+## Local gstack integration
+
+If you are wiring Hermes to a local `gstack` checkout on the same machine, do not use the normal remote Hub import path for that setup. Use the dedicated local integration flow instead:
+
+```bash
+cd path/to/hermes-agent
+scripts/gstack-hermes.sh install
+scripts/gstack-hermes.sh verify
+```
+
+By default the flow targets `~/Github/gstack-main`; override with `GSTACK_DIR=/path/to/gstack`. It generates `.hermes/skills/gstack-*` in the gstack repo and links them into `~/.hermes/skills`.
+
+See [Use Gstack with Hermes](/docs/guides/use-gstack-with-hermes) for install, verification, uninstall, and troubleshooting.
+
 :::info
 The agent can also create and update skills itself using `skill_manage`. After solving a complex problem, Hermes may offer to save the approach as a skill for next time.
 :::

@@ -356,6 +356,16 @@ hermes skills install openai/skills/k8s
 hermes skills tap add myorg/skills-repo
 ```
 
+If you are integrating Hermes with a local checkout of `gstack` on the same machine, that is a separate workflow from GitHub skill import. Use the local setup helper in the Hermes repo instead of importing `garrytan/gstack` through the Hub:
+
+```bash
+cd path/to/hermes-agent
+scripts/gstack-hermes.sh install
+scripts/gstack-hermes.sh verify
+```
+
+Guide: [Use Gstack with Hermes](/docs/guides/use-gstack-with-hermes)
+
 #### 5. ClawHub (`clawhub`)
 
 A third-party skills marketplace integrated as a community source.

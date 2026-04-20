@@ -178,7 +178,8 @@ def do_search(query: str, source: str = "all", limit: int = 10,
 
     c.print(table)
     c.print("[dim]Use: hermes skills inspect <identifier> to preview, "
-            "hermes skills install <identifier> to install[/]\n")
+            "hermes skills install <identifier> to install. "
+            "For a local gstack checkout, use scripts/gstack-hermes.sh instead of importing garrytan/gstack through the Hub.[/]\n")
 
 
 def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
@@ -1217,6 +1218,7 @@ def _print_skills_help(console: Console) -> None:
         "  [cyan]uninstall[/] <name>            Remove a hub-installed skill\n"
         "  [cyan]publish[/] <path> --repo <r>   Publish a skill to GitHub via PR\n"
         "  [cyan]snapshot[/] export|import      Export/import skill configurations\n"
-        "  [cyan]tap[/] list|add|remove         Manage skill sources\n",
+        "  [cyan]tap[/] list|add|remove         Manage skill sources\n\n"
+        "[dim]Local gstack integration uses scripts/gstack-hermes.sh; it is separate from Hub installs such as garrytan/gstack.[/]",
         title="/skills",
     ))

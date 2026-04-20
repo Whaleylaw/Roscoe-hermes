@@ -95,6 +95,10 @@ See the [Messaging Gateway overview](/docs/user-guide/messaging) for the platfor
 - **[Plugin System](/docs/user-guide/features/plugins)** — Extend Hermes with custom tools, lifecycle hooks, and CLI commands without modifying core code. Plugins are discovered from `~/.hermes/plugins/`, project-local `.hermes/plugins/`, and pip-installed entry points.
 - **[Build a Plugin](/docs/guides/build-a-hermes-plugin)** — Step-by-step guide for creating Hermes plugins with tools, hooks, and CLI commands.
 
+## Local skill ecosystems
+
+- **[Use Gstack with Hermes](/docs/guides/use-gstack-with-hermes)** — Install, verify, and remove a local `gstack` checkout so Hermes can use the generated `gstack-*` skills under `~/.hermes/skills`.
+
 ## Training & Evaluation
 
 - **[RL Training](/docs/user-guide/features/rl-training)** — Generate trajectory data from agent sessions for reinforcement learning and model fine-tuning. Supports Atropos environments with customizable reward functions.
