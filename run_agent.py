@@ -4171,7 +4171,12 @@ class AIAgent:
                                 "Codex stream: backfilled %d output items from stream events",
                                 len(collected_output_items),
                             )
-                        elif self._codex_streamed_text_parts and not has_tool_calls:
+                        elif self._codex_streamed_text_parts:
+                            # Synthesize a message output item from streamed
+                            # text deltas.  This fires even when tool calls
+                            # are present — the model may stream both text
+                            # and function_call items, but get_final_response()
+                            # sometimes drops the message item from output.
                             assembled = "".join(self._codex_streamed_text_parts)
                             final_response.output = [SimpleNamespace(
                                 type="message",
@@ -4180,8 +4185,8 @@ class AIAgent:
                                 content=[SimpleNamespace(type="output_text", text=assembled)],
                             )]
                             logger.debug(
-                                "Codex stream: synthesized output from %d text deltas (%d chars)",
-                                len(self._codex_streamed_text_parts), len(assembled),
+                                "Codex stream: synthesized output from %d text deltas (%d chars, has_tool_calls=%s)",
+                                len(self._codex_streamed_text_parts), len(assembled), has_tool_calls,
                             )
                     return final_response
             except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
@@ -7972,6 +7977,68 @@ class AIAgent:
                                     "(%d chars); deferring to normalization.",
                                     len(_out_text_stripped),
                                 )
+                            elif getattr(self, '_last_content_with_tools', None):
+                                # The prior turn already delivered the final
+                                # answer alongside tool calls (e.g. memory
+                                # save).  An empty follow-up is expected — the
+                                # model has nothing more to say.  Let it pass
+                                # through to the "No tool calls" path which
+                                # uses _last_content_with_tools as fallback.
+                                logger.debug(
+                                    "Codex response.output is empty but "
+                                    "_last_content_with_tools is set; treating "
+                                    "as valid empty completion.",
+                                )
+                                # Synthesize a minimal output so
+                                # _normalize_codex_response doesn't raise.
+                                response.output = [SimpleNamespace(
+                                    type="message", role="assistant",
+                                    status="completed",
+                                    content=[SimpleNamespace(
+                                        type="output_text", text="",
+                                    )],
+                                )]
+                            elif getattr(self, '_codex_streamed_text_parts', None):
+                                # Streaming delivered text deltas to the user
+                                # but get_final_response() returned empty
+                                # output.  Synthesize from the captured deltas
+                                # instead of treating the response as invalid.
+                                _streamed = "".join(self._codex_streamed_text_parts)
+                                logger.debug(
+                                    "Codex response.output is empty but %d "
+                                    "text deltas were streamed (%d chars); "
+                                    "synthesizing output.",
+                                    len(self._codex_streamed_text_parts),
+                                    len(_streamed),
+                                )
+                                response.output = [SimpleNamespace(
+                                    type="message", role="assistant",
+                                    status="completed",
+                                    content=[SimpleNamespace(
+                                        type="output_text", text=_streamed,
+                                    )],
+                                )]
+                            elif (
+                                messages
+                                and isinstance(messages[-1], dict)
+                                and messages[-1].get("role") == "tool"
+                            ):
+                                # Post-tool-execution empty response: the model
+                                # processed tool results and has nothing more to
+                                # say.  This is normal — synthesize a minimal
+                                # output so the agent loop can exit cleanly via
+                                # the "No tool calls" → fallback path.
+                                logger.debug(
+                                    "Codex response.output is empty after tool "
+                                    "results; treating as valid empty completion.",
+                                )
+                                response.output = [SimpleNamespace(
+                                    type="message", role="assistant",
+                                    status="completed",
+                                    content=[SimpleNamespace(
+                                        type="output_text", text="",
+                                    )],
+                                )]
                             else:
                                 _resp_status = getattr(response, "status", None)
                                 _resp_incomplete = getattr(response, "incomplete_details", None)
