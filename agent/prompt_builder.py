@@ -829,8 +829,10 @@ def build_nous_subscription_prompt(valid_tool_names: "set[str] | None" = None) -
 
 
 # =========================================================================
-# Context files (SOUL.md, AGENTS.md, .cursorrules)
+# Context files (SOUL.md, AGENTS.md, .cursorrules) + Active Follow-ups
 # =========================================================================
+
+ACTIVE_FOLLOWUPS_FILENAME = "active_followups.md"
 
 def _truncate_content(content: str, filename: str, max_chars: int = CONTEXT_FILE_MAX_CHARS) -> str:
     """Head/tail truncation with a marker in the middle."""
@@ -870,6 +872,41 @@ def load_soul_md() -> Optional[str]:
     except Exception as e:
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
         return None
+
+
+def load_active_followups_md() -> str:
+    """Load HERMES_HOME/active_followups.md and return an addendum block.
+
+    This file is intended for durable, cross-session operational follow-ups
+    (e.g., pending check-ins, dated reminders). When present, it is injected
+    into the system prompt so the agent can proactively surface unfinished
+    items in normal conversation.
+    """
+    try:
+        from hermes_cli.config import ensure_hermes_home
+        ensure_hermes_home()
+    except Exception as e:
+        logger.debug("Could not ensure HERMES_HOME before loading active follow-ups: %s", e)
+
+    followups_path = get_hermes_home() / ACTIVE_FOLLOWUPS_FILENAME
+    if not followups_path.exists():
+        return ""
+    try:
+        content = followups_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return ""
+        content = _scan_context_content(content, ACTIVE_FOLLOWUPS_FILENAME)
+        result = (
+            "# Active Follow-up Board\n\n"
+            "The following follow-ups are active and should be treated as open loops. "
+            "Surface relevant items when chatting with the user, and close/update them "
+            "when done.\n\n"
+            f"## {ACTIVE_FOLLOWUPS_FILENAME}\n\n{content}"
+        )
+        return _truncate_content(result, ACTIVE_FOLLOWUPS_FILENAME)
+    except Exception as e:
+        logger.debug("Could not read active follow-ups from %s: %s", followups_path, e)
+        return ""
 
 
 def _load_hermes_md(cwd_path: Path) -> str:

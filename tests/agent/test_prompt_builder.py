@@ -18,6 +18,7 @@ from agent.prompt_builder import (
     build_skills_system_prompt,
     build_nous_subscription_prompt,
     build_context_files_prompt,
+    load_active_followups_md,
     CONTEXT_FILE_MAX_CHARS,
     DEFAULT_AGENT_IDENTITY,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
@@ -668,6 +669,30 @@ class TestBuildContextFilesPrompt:
         (tmp_path / ".cursorrules").write_text("Use ESLint.")
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "ESLint" in result
+
+
+
+class TestActiveFollowupsPrompt:
+    def test_loads_active_followups_from_hermes_home(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes_home"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        (hermes_home / "active_followups.md").write_text(
+            "- [ ] 2026-04-22: Check Justin lien response (Crader)",
+            encoding="utf-8",
+        )
+
+        result = load_active_followups_md()
+        assert "Active Follow-up Board" in result
+        assert "Check Justin lien response" in result
+
+    def test_missing_active_followups_returns_empty(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes_home"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        result = load_active_followups_md()
+        assert result == ""
 
 
 # =========================================================================
