@@ -287,6 +287,7 @@ from gateway.platforms.base import (
     MessageType,
     merge_pending_message_event,
 )
+from gateway.unified_timeline import UnifiedTimeline, TurnHandle
 from gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
@@ -4354,6 +4355,29 @@ class GatewayRunner:
         if message_text is None:
             return
 
+        # Record the inbound turn on the unified timeline.  The handle is
+        # kept in local scope so the outbound path below can close the
+        # loop.  Default-on in GatewayConfig (T5); can be disabled via
+        # ``gateway.unified_timeline.enabled=false`` for rollback.
+        turn_handle: Optional[TurnHandle] = None
+        if (
+            getattr(self.config, "unified_timeline", None)
+            and self.config.unified_timeline.enabled
+            and self._session_db is not None
+        ):
+            try:
+                _ut = UnifiedTimeline.for_active_profile(db=self._session_db)
+                turn_handle = _ut.record_inbound(
+                    source=source,
+                    content=message_text,
+                    message_id=event.message_id,
+                )
+            except Exception as _ut_err:
+                logger.warning(
+                    "unified_timeline record_inbound failed: %s",
+                    _ut_err,
+                )
+
         # Bind this gateway run generation to the adapter's active-session
         # event so deferred post-delivery callbacks can be released by the
         # same run that registered them.
@@ -4512,7 +4536,20 @@ class GatewayRunner:
                 **hook_ctx,
                 "response": (response or "")[:500],
             })
-            
+
+            # Close the unified-timeline loop: the outbound record is tied
+            # to the inbound TurnHandle captured above.  Skipped on empty
+            # responses (streaming already delivered, no content, etc.).
+            if turn_handle is not None and response:
+                try:
+                    _ut_out = UnifiedTimeline.for_active_profile(db=self._session_db)
+                    _ut_out.record_outbound(turn=turn_handle, content=response)
+                except Exception as _ut_err:
+                    logger.warning(
+                        "unified_timeline record_outbound failed: %s",
+                        _ut_err,
+                    )
+
             # Check for pending process watchers (check_interval on background processes)
             try:
                 from tools.process_registry import process_registry
