@@ -1214,7 +1214,21 @@ class SessionStore:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
-        """Load all messages from a session's transcript."""
+        """Load messages for the agent to consume.
+
+        When ``unified_timeline`` is enabled (the default), returns the
+        profile's unified timeline in OpenAI conversation format — the
+        agent has one continuous memory across every channel it is
+        reachable on. When disabled, falls back to the legacy per-session
+        transcript (SQLite + JSONL fallback).
+        """
+        if getattr(self.config, "unified_timeline", None) and self.config.unified_timeline.enabled:
+            from hermes_cli.profiles import get_active_profile_name
+            return self.load_timeline_conversation(
+                profile_id=get_active_profile_name(),
+            )
+
+        # Legacy path — preserved exactly as before for the disabled case.
         db_messages = []
         # Try SQLite first
         if self._db:

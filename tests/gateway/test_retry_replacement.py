@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig
+from gateway.config import GatewayConfig, UnifiedTimelineConfig
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.run import GatewayRunner
 from gateway.session import SessionStore
@@ -12,7 +12,11 @@ from gateway.session import SessionStore
 
 @pytest.mark.asyncio
 async def test_gateway_retry_replaces_last_user_turn_in_transcript(tmp_path):
-    config = GatewayConfig()
+    # /retry operates on the per-session transcript; disable unified
+    # timeline so load_transcript reads the session we seed below.
+    config = GatewayConfig(
+        unified_timeline=UnifiedTimelineConfig(enabled=False),
+    )
     with patch("gateway.session.SessionStore._ensure_loaded"):
         store = SessionStore(sessions_dir=tmp_path, config=config)
     store._db = None

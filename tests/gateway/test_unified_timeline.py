@@ -1,7 +1,7 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from gateway.config import GatewayConfig, Platform
+from gateway.config import GatewayConfig, Platform, UnifiedTimelineConfig
 from gateway.session import SessionSource, SessionStore
 from gateway.unified_timeline import UnifiedTimeline
 from hermes_state import SessionDB
@@ -85,4 +85,46 @@ def test_load_timeline_conversation_returns_openai_shape(tmp_path: Path):
         {"role": "user", "content": "how are you"},
         {"role": "assistant", "content": "I am well"},
     ]
+    db.close()
+
+
+def test_load_transcript_routes_through_timeline_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    ut = UnifiedTimeline(db=db, profile_id="default")
+    h = ut.record_inbound(source=_source(), content="unified-content", message_id="m1")
+    ut.record_outbound(turn=h, content="agent-reply")
+
+    cfg = GatewayConfig()
+    assert cfg.unified_timeline.enabled is True  # default
+    store = SessionStore(sessions_dir=tmp_path / "sessions", config=cfg)
+    store._db = db
+
+    # load_transcript should return the unified timeline, not the empty
+    # per-session transcript.
+    msgs = store.load_transcript(session_id="any-legacy-id")
+    contents = [m["content"] for m in msgs]
+    assert "unified-content" in contents
+    assert "agent-reply" in contents
+    db.close()
+
+
+def test_load_transcript_uses_legacy_path_when_flag_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    ut = UnifiedTimeline(db=db, profile_id="default")
+    ut.record_inbound(source=_source(), content="ignored", message_id="m1")
+
+    cfg = GatewayConfig(unified_timeline=UnifiedTimelineConfig(enabled=False))
+    store = SessionStore(sessions_dir=tmp_path / "sessions", config=cfg)
+    store._db = db
+    # No legacy per-session messages exist, so result is empty —
+    # importantly, does NOT contain the unified timeline entry.
+    msgs = store.load_transcript(session_id="any-legacy-id")
+    contents = [m["content"] for m in msgs]
+    assert "ignored" not in contents
     db.close()

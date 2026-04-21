@@ -10,6 +10,7 @@ from gateway.config import (
     GatewayConfig,
     PlatformConfig,
     SessionFunnelConfig,
+    UnifiedTimelineConfig,
 )
 from gateway.session import (
     SessionSource,
@@ -389,7 +390,12 @@ class TestSessionStoreRewriteTranscript:
 
     @pytest.fixture()
     def store(self, tmp_path):
-        config = GatewayConfig()
+        # These tests exercise the legacy per-session transcript path;
+        # disable the unified timeline flag so load_transcript reads
+        # JSONL/SQLite directly instead of the cross-channel timeline.
+        config = GatewayConfig(
+            unified_timeline=UnifiedTimelineConfig(enabled=False),
+        )
         with patch("gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)
         s._db = None  # no SQLite for these tests
@@ -434,7 +440,11 @@ class TestLoadTranscriptCorruptLines:
 
     @pytest.fixture()
     def store(self, tmp_path):
-        config = GatewayConfig()
+        # Legacy JSONL path — disable unified timeline so load_transcript
+        # reads per-session transcripts directly.
+        config = GatewayConfig(
+            unified_timeline=UnifiedTimelineConfig(enabled=False),
+        )
         with patch("gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)
         s._db = None
@@ -487,7 +497,12 @@ class TestLoadTranscriptPreferLongerSource:
         """SessionStore with both SQLite and JSONL active."""
         from hermes_state import SessionDB
 
-        config = GatewayConfig()
+        # These tests specifically exercise the legacy prefer-longer-source
+        # behavior between SQLite and JSONL — disable the unified timeline
+        # flag so load_transcript stays on that code path.
+        config = GatewayConfig(
+            unified_timeline=UnifiedTimelineConfig(enabled=False),
+        )
         with patch("gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)
         s._db = SessionDB(db_path=tmp_path / "state.db")
