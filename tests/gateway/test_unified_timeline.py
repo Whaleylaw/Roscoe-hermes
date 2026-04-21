@@ -1,8 +1,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from gateway.config import Platform
-from gateway.session import SessionSource
+from gateway.config import GatewayConfig, Platform
+from gateway.session import SessionSource, SessionStore
 from gateway.unified_timeline import UnifiedTimeline
 from hermes_state import SessionDB
 
@@ -63,4 +63,26 @@ def test_from_active_profile_uses_profile_name(tmp_path: Path, monkeypatch):
     with patch("gateway.unified_timeline.get_active_profile_name", return_value="coder"):
         ut = UnifiedTimeline.for_active_profile(db=db)
     assert ut.profile_id == "coder"
+    db.close()
+
+
+def test_load_timeline_conversation_returns_openai_shape(tmp_path: Path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    ut = UnifiedTimeline(db=db, profile_id="default")
+    ut.record_inbound(source=_source(), content="hi there", message_id="m1")
+    handle = ut.record_inbound(source=_source(), content="how are you", message_id="m2")
+    ut.record_outbound(turn=handle, content="I am well")
+
+    store = SessionStore(
+        sessions_dir=tmp_path / "sessions",
+        config=GatewayConfig(),
+    )
+    # Inject the same db the timeline wrote to, matching production wiring.
+    store._db = db
+    msgs = store.load_timeline_conversation(profile_id="default")
+    assert msgs == [
+        {"role": "user", "content": "hi there"},
+        {"role": "user", "content": "how are you"},
+        {"role": "assistant", "content": "I am well"},
+    ]
     db.close()

@@ -1241,6 +1241,34 @@ class SessionStore:
 
         return db_messages
 
+    def load_timeline_conversation(
+        self, profile_id: str, limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Load the profile's unified timeline in OpenAI conversation format.
+
+        Returns a list of ``{"role": "user"|"assistant", "content": str}``
+        dicts in chronological order. This is the cross-channel analog of
+        :meth:`load_transcript` and is the new source of truth for agent
+        context when the unified timeline is enabled.
+        """
+        if not self._db:
+            return []
+        try:
+            rows = self._db.get_timeline_messages(
+                profile_id=profile_id, limit=limit,
+            )
+        except Exception as e:
+            logger.warning("Failed to load unified timeline for %s: %s",
+                           profile_id, e)
+            return []
+        return [
+            {
+                "role": "assistant" if r["direction"] == "outbound" else "user",
+                "content": r["content"] or "",
+            }
+            for r in rows
+        ]
+
 
 def build_session_context(
     source: SessionSource,
