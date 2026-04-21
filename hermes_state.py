@@ -1031,6 +1031,84 @@ class SessionDB:
 
         return self._execute_write(_do)
 
+    # =========================================================================
+    # Unified timeline storage (profile-scoped, cross-channel)
+    # =========================================================================
+
+    def timeline_next_seq(self, profile_id: str) -> int:
+        """Return the next monotonic seq value for a profile's timeline."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM unified_timeline "
+                "WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+        return int(row[0])
+
+    def append_timeline_message(
+        self,
+        profile_id: str,
+        direction: str,
+        platform: str,
+        source_chat_id: Optional[str],
+        source_thread_id: Optional[str],
+        author: Optional[str],
+        content: Optional[str],
+        message_id: Optional[str],
+        ts: float,
+        salience: str = "primary",
+    ) -> int:
+        """Append one row to unified_timeline. Returns the assigned seq."""
+        def _do(conn):
+            row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM unified_timeline "
+                "WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+            seq = int(row[0])
+            conn.execute(
+                "INSERT INTO unified_timeline (profile_id, seq, ts, direction, "
+                "platform, source_chat_id, source_thread_id, author, content, "
+                "message_id, salience) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (profile_id, seq, ts, direction, platform, source_chat_id,
+                 source_thread_id, author, content, message_id, salience),
+            )
+            return seq
+        return self._execute_write(_do)
+
+    def get_timeline_messages(
+        self,
+        profile_id: str,
+        limit: Optional[int] = None,
+        salience: str = "primary",
+    ) -> List[Dict[str, Any]]:
+        """Load timeline messages for a profile, ordered by seq ascending.
+
+        When ``limit`` is given, returns the most recent N messages, still
+        ordered seq-ascending (oldest of the N first).
+        """
+        with self._lock:
+            if limit is None:
+                cursor = self._conn.execute(
+                    "SELECT profile_id, seq, ts, direction, platform, "
+                    "source_chat_id, source_thread_id, author, content, "
+                    "message_id, salience FROM unified_timeline "
+                    "WHERE profile_id = ? AND salience = ? ORDER BY seq ASC",
+                    (profile_id, salience),
+                )
+                rows = cursor.fetchall()
+            else:
+                cursor = self._conn.execute(
+                    "SELECT * FROM (SELECT profile_id, seq, ts, direction, "
+                    "platform, source_chat_id, source_thread_id, author, "
+                    "content, message_id, salience FROM unified_timeline "
+                    "WHERE profile_id = ? AND salience = ? "
+                    "ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC",
+                    (profile_id, salience, limit),
+                )
+                rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages for a session, ordered by timestamp."""
         with self._lock:
