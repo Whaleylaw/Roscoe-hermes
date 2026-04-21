@@ -3898,6 +3898,35 @@ class GatewayRunner:
 
         return message_text
 
+    def _record_error_outbound(
+        self,
+        turn_handle: Optional[TurnHandle],
+        ut: Optional[UnifiedTimeline],
+        err_response: str,
+    ) -> None:
+        """Record an error-path outbound reply on the unified timeline.
+
+        Mirrors the happy-path record at the end of
+        ``_handle_message_with_agent`` so user-visible error messages
+        close the turn — otherwise the agent's timeline shows an
+        inbound with no reply, and on the next turn the agent believes
+        its last utterance was from two turns ago.
+
+        Best-effort: no-op when the timeline is disabled, when the
+        inbound never recorded (``turn_handle is None``), or when the
+        error response is empty.  Failures log a warning and never
+        break the already-failing turn.
+        """
+        if turn_handle is None or ut is None or not err_response:
+            return
+        try:
+            ut.record_outbound(turn=turn_handle, content=err_response)
+        except Exception as _ut_err:
+            logger.warning(
+                "unified_timeline record_outbound (error path) failed: %s",
+                _ut_err,
+            )
+
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -4355,28 +4384,12 @@ class GatewayRunner:
         if message_text is None:
             return
 
-        # Record the inbound turn on the unified timeline.  The handle is
-        # kept in local scope so the outbound path below can close the
-        # loop.  Default-on in GatewayConfig (T5); can be disabled via
-        # ``gateway.unified_timeline.enabled=false`` for rollback.
+        # Unified-timeline handle — bound below, after the stale-run check,
+        # so discarded stale runs don't leave orphan inbound rows that a
+        # subsequent live run would duplicate.  Declared here so the outer
+        # exception handler can reach it.
         turn_handle: Optional[TurnHandle] = None
-        if (
-            getattr(self.config, "unified_timeline", None)
-            and self.config.unified_timeline.enabled
-            and self._session_db is not None
-        ):
-            try:
-                _ut = UnifiedTimeline.for_active_profile(db=self._session_db)
-                turn_handle = _ut.record_inbound(
-                    source=source,
-                    content=message_text,
-                    message_id=event.message_id,
-                )
-            except Exception as _ut_err:
-                logger.warning(
-                    "unified_timeline record_inbound failed: %s",
-                    _ut_err,
-                )
+        ut: Optional[UnifiedTimeline] = None
 
         # Bind this gateway run generation to the adapter's active-session
         # event so deferred post-delivery callbacks can be released by the
@@ -4433,6 +4446,31 @@ class GatewayRunner:
                 elif _stale_adapter and hasattr(_stale_adapter, "_post_delivery_callbacks"):
                     _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
                 return None
+
+            # Record the inbound turn on the unified timeline now that we
+            # know this run is the one that will produce the response.
+            # Placing the write after the stale-run guard prevents orphan
+            # inbound rows (the newer live run would re-record the same
+            # user message, double-logging the turn).
+            # Default-on in GatewayConfig (T5); can be disabled via
+            # ``gateway.unified_timeline.enabled=false`` for rollback.
+            if (
+                getattr(self.config, "unified_timeline", None)
+                and self.config.unified_timeline.enabled
+                and self._session_db is not None
+            ):
+                try:
+                    ut = UnifiedTimeline.for_active_profile(db=self._session_db)
+                    turn_handle = ut.record_inbound(
+                        source=source,
+                        content=message_text,
+                        message_id=event.message_id,
+                    )
+                except Exception as _ut_err:
+                    logger.warning(
+                        "unified_timeline record_inbound failed: %s",
+                        _ut_err,
+                    )
 
             response = agent_result.get("final_response") or ""
 
@@ -4540,10 +4578,11 @@ class GatewayRunner:
             # Close the unified-timeline loop: the outbound record is tied
             # to the inbound TurnHandle captured above.  Skipped on empty
             # responses (streaming already delivered, no content, etc.).
-            if turn_handle is not None and response:
+            # Reuses the ``ut`` resolved at inbound time — saves a second
+            # profile lookup and keeps both records on the same service.
+            if turn_handle is not None and ut is not None and response:
                 try:
-                    _ut_out = UnifiedTimeline.for_active_profile(db=self._session_db)
-                    _ut_out.record_outbound(turn=turn_handle, content=response)
+                    ut.record_outbound(turn=turn_handle, content=response)
                 except Exception as _ut_err:
                     logger.warning(
                         "unified_timeline record_outbound failed: %s",
@@ -4759,19 +4798,23 @@ class GatewayRunner:
                 # 500 with a large session often means the payload is too large
                 # for the API to process — treat it the same way.
                 if _hist_len > 50:
-                    return (
+                    err_response = (
                         "⚠️ Session too large for the model's context window.\n"
                         "Use /compact to compress the conversation, or "
                         "/reset to start fresh."
                     )
+                    self._record_error_outbound(turn_handle, ut, err_response)
+                    return err_response
                 elif status_code == 400:
                     status_hint = " The request was rejected by the API."
-            return (
+            err_response = (
                 f"Sorry, I encountered an error ({error_type}).\n"
                 f"{error_detail}\n"
                 f"{status_hint}"
                 "Try again or use /reset to start a fresh session."
             )
+            self._record_error_outbound(turn_handle, ut, err_response)
+            return err_response
         finally:
             # Restore session context variables to their pre-handler state
             self._clear_session_env(_session_env_tokens)

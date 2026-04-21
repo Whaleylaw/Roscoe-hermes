@@ -807,6 +807,8 @@ git commit -m "feat(gateway): UnifiedTimelineConfig with session_funnel deprecat
 
 ## Task 6: Wire Telegram adapter to record inbound/outbound through UnifiedTimeline
 
+> **Implementation note (post-investigation):** The plan's per-adapter code snippets were architecturally incorrect. The wiring lives in `gateway/run.py._handle_message_with_agent`, which every runner-backed platform goes through (Telegram, Discord, Slack, iMessage, Matrix, WhatsApp, Feishu, WeCom, …). One hook site covers them all. `gateway/platforms/telegram.py` is not modified. api_server (T7) still needs its own wiring because it has a separate endpoint handler.
+
 **Files:**
 - Modify: `gateway/platforms/telegram.py` — at the inbound message handling path, call `UnifiedTimeline.record_inbound` before (or alongside) the existing `SessionStore` write; at outbound, call `record_outbound` after the agent reply is produced.
 - Test: `tests/gateway/test_unified_timeline_telegram.py` (new).
