@@ -242,6 +242,23 @@ class SessionFunnelConfig:
 
 
 @dataclass
+class UnifiedTimelineConfig:
+    """Config for the cross-channel unified timeline.
+
+    Default-on. Replaces the older ``session_funnel`` feature, which is
+    parsed for backwards compatibility but emits a deprecation warning.
+    """
+    enabled: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"enabled": self.enabled}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "UnifiedTimelineConfig":
+        return cls(enabled=bool(data.get("enabled", True)))
+
+
+@dataclass
 class GatewayConfig:
     """
     Main gateway configuration.
@@ -283,6 +300,9 @@ class GatewayConfig:
 
     # Session funnel configuration
     session_funnel: SessionFunnelConfig = field(default_factory=SessionFunnelConfig)
+
+    # Unified timeline configuration (replaces session_funnel)
+    unified_timeline: UnifiedTimelineConfig = field(default_factory=UnifiedTimelineConfig)
 
     # Session store pruning: drop SessionEntry records older than this many
     # days from the in-memory dict and sessions.json.  Keeps the store from
@@ -399,6 +419,7 @@ class GatewayConfig:
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
             "session_funnel": self.session_funnel.to_dict(),
+            "unified_timeline": self.unified_timeline.to_dict(),
             "session_store_max_age_days": self.session_store_max_age_days,
         }
     
@@ -451,6 +472,18 @@ class GatewayConfig:
         if session_funnel_data is None:
             session_funnel_data = data.get("sessionFunnel")
 
+        unified_timeline_data = data.get("unified_timeline")
+        # Backwards-compat shim: if session_funnel.enabled is True and
+        # unified_timeline is not explicitly configured, treat session_funnel
+        # as a request for unified timeline behavior and warn.
+        if unified_timeline_data is None and session_funnel_data:
+            if bool(session_funnel_data.get("enabled", False)):
+                logger.warning(
+                    "gateway.session_funnel is deprecated; use "
+                    "gateway.unified_timeline.enabled=true instead."
+                )
+                unified_timeline_data = {"enabled": True}
+
         try:
             session_store_max_age_days = int(data.get("session_store_max_age_days", 90))
             if session_store_max_age_days < 0:
@@ -473,6 +506,7 @@ class GatewayConfig:
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_funnel=SessionFunnelConfig.from_dict(session_funnel_data or {}),
+            unified_timeline=UnifiedTimelineConfig.from_dict(unified_timeline_data or {}),
             session_store_max_age_days=session_store_max_age_days,
         )
 
