@@ -46,7 +46,7 @@ from gateway.platforms.base import (
     SendResult,
     is_network_accessible,
 )
-from gateway.session import SessionSource
+from gateway.session import SessionSource, _timeline_rows_to_openai_messages
 from gateway.unified_timeline import TurnHandle, UnifiedTimeline
 
 logger = logging.getLogger(__name__)
@@ -708,13 +708,7 @@ class APIServerAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("Failed to load unified timeline history: %s", e)
             return []
-        return [
-            {
-                "role": "assistant" if r.get("direction") == "outbound" else "user",
-                "content": r.get("content") or "",
-            }
-            for r in rows
-        ]
+        return _timeline_rows_to_openai_messages(rows)
 
     def _record_inbound_timeline(
         self, *, session_id: str, user_message: Any, request: "web.Request",
@@ -1265,6 +1259,14 @@ class APIServerAdapter(BasePlatformAdapter):
             # Prefer accumulated stream deltas; fall back to the agent's
             # final_response for providers that only emit the full reply at
             # the end (or when streaming was suppressed by a tool-only turn).
+            #
+            # finalize_cb fires only on the happy path. If the client
+            # disconnects mid-stream the except-block below takes over and
+            # the outbound record is intentionally skipped — recording a
+            # partial reply as "what the agent said" would mislead the next
+            # turn's context load. The inbound row is already persisted so
+            # the user's message isn't lost; the agent just never claims
+            # credit for an interrupted response.
             if finalize_cb is not None:
                 full_text = "".join(accumulated_text) or agent_final_text
                 try:
@@ -1677,6 +1679,16 @@ class APIServerAdapter(BasePlatformAdapter):
                 })
 
                 # Record the assistant reply on the unified timeline.
+                #
+                # finalize_cb fires only on the happy path (response.completed
+                # emitted cleanly). If the client disconnects mid-stream the
+                # except-block below takes over and the outbound record is
+                # intentionally skipped — recording a partial reply as "what
+                # the agent said" would mislead the next turn's context load.
+                # The inbound row is already persisted so the user's message
+                # isn't lost; the agent just never claims credit for an
+                # interrupted response.  Failure envelopes (response.failed)
+                # also skip finalize_cb on purpose — same reasoning.
                 if finalize_cb is not None:
                     try:
                         finalize_cb(final_response_text or "")

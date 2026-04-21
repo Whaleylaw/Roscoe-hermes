@@ -556,6 +556,26 @@ def resolve_session_key(
     )
 
 
+def _timeline_rows_to_openai_messages(
+    rows: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """Map unified_timeline rows to the OpenAI conversation shape.
+
+    Shared by :meth:`SessionStore.load_timeline_conversation` and by
+    platform adapters (e.g. ``APIServerAdapter``) that read the timeline
+    directly via :class:`hermes_state.SessionDB`. Centralizing the
+    mapping keeps the role/content contract stable across callers as
+    the timeline evolves.
+    """
+    return [
+        {
+            "role": "assistant" if r["direction"] == "outbound" else "user",
+            "content": r["content"] or "",
+        }
+        for r in rows
+    ]
+
+
 class SessionStore:
     """
     Manages session storage and retrieval.
@@ -1261,13 +1281,7 @@ class SessionStore:
             logger.warning("Failed to load unified timeline for %s: %s",
                            profile_id, e)
             return []
-        return [
-            {
-                "role": "assistant" if r["direction"] == "outbound" else "user",
-                "content": r["content"] or "",
-            }
-            for r in rows
-        ]
+        return _timeline_rows_to_openai_messages(rows)
 
 
 def build_session_context(
