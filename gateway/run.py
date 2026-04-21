@@ -592,6 +592,45 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
     return None
 
 
+def maybe_run_unified_timeline_migration() -> None:
+    """Run the one-shot legacy → unified_timeline migration if needed.
+
+    Writes a flag file to HERMES_HOME on completion so subsequent gateway
+    starts skip the walk. Manual reruns via ``scripts/migrate_to_unified_timeline.py``
+    are always safe.
+    """
+    from hermes_constants import get_hermes_home
+    from hermes_cli.profiles import get_active_profile_name
+    flag = get_hermes_home() / ".unified_timeline_migrated"
+    if flag.exists():
+        return
+    try:
+        from scripts.migrate_to_unified_timeline import migrate
+        migrate(profile_id=get_active_profile_name())
+    except Exception as exc:
+        # Migration is best-effort — failure should not block the gateway
+        # from starting. The unified_timeline table still works for new
+        # messages; legacy history just won't be backfilled.
+        import logging
+        logging.getLogger(__name__).warning(
+            "unified_timeline migration failed: %s — continuing startup", exc,
+        )
+        return
+    # Ensure the flag file exists even if ``migrate()`` did not write one
+    # (e.g. a patched/stub implementation in tests). This is the guard
+    # that actually prevents the startup hook from re-running on the
+    # next boot — without it, a stubbed migrator would re-fire forever.
+    if not flag.exists():
+        try:
+            flag.parent.mkdir(parents=True, exist_ok=True)
+            flag.write_text("migrated\n")
+        except Exception as _flag_err:
+            import logging
+            logging.getLogger(__name__).warning(
+                "unified_timeline flag write failed: %s", _flag_err,
+            )
+
+
 class GatewayRunner:
     """
     Main gateway controller.
@@ -1918,6 +1957,23 @@ class GatewayRunner:
             write_runtime_status(gateway_state="starting", exit_reason=None)
         except Exception:
             pass
+
+        # T10: One-shot backfill of legacy transcripts into the
+        # ``unified_timeline`` table. Guarded by a flag file in
+        # HERMES_HOME so subsequent starts skip the walk. Gated on
+        # ``unified_timeline.enabled`` so sites on the rollback path
+        # (T5) don't pay the startup cost.
+        try:
+            if (
+                getattr(self.config, "unified_timeline", None)
+                and self.config.unified_timeline.enabled
+            ):
+                maybe_run_unified_timeline_migration()
+        except Exception as _ut_mig_err:
+            logger.warning(
+                "unified_timeline startup migration hook failed: %s",
+                _ut_mig_err,
+            )
         
         # Warn if no user allowlists are configured and open access is not opted in
         _any_allowlist = any(
