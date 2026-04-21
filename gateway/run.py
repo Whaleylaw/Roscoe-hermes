@@ -2805,7 +2805,15 @@ class GatewayRunner:
             if not check_api_server_requirements():
                 logger.warning("API Server: aiohttp not installed")
                 return None
-            return APIServerAdapter(config)
+            adapter = APIServerAdapter(config)
+            # Inject the gateway-level config so feature flags like
+            # ``unified_timeline.enabled`` don't need to be lazy-loaded
+            # inside each request handler.
+            try:
+                adapter.set_gateway_config(self.config)
+            except Exception as e:
+                logger.debug("API Server: could not inject gateway config: %s", e)
+            return adapter
 
         elif platform == Platform.WEBHOOK:
             from gateway.platforms.webhook import WebhookAdapter, check_webhook_requirements
