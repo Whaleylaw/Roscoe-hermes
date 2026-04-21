@@ -31,7 +31,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -88,6 +88,24 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS unified_timeline (
+    profile_id         TEXT NOT NULL,
+    seq                INTEGER NOT NULL,
+    ts                 REAL NOT NULL,
+    direction          TEXT NOT NULL,
+    platform           TEXT NOT NULL,
+    source_chat_id     TEXT,
+    source_thread_id   TEXT,
+    author             TEXT,
+    content            TEXT,
+    message_id         TEXT,
+    salience           TEXT NOT NULL DEFAULT 'primary',
+    PRIMARY KEY (profile_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_unified_timeline_lookup
+    ON unified_timeline(profile_id, platform, source_chat_id, source_thread_id, message_id, ts);
 """
 
 FTS_SQL = """
@@ -108,6 +126,25 @@ END;
 CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
     INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS unified_timeline_fts USING fts5(
+    content,
+    content=unified_timeline,
+    content_rowid=rowid
+);
+
+CREATE TRIGGER IF NOT EXISTS unified_timeline_fts_insert AFTER INSERT ON unified_timeline BEGIN
+    INSERT INTO unified_timeline_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS unified_timeline_fts_delete AFTER DELETE ON unified_timeline BEGIN
+    INSERT INTO unified_timeline_fts(unified_timeline_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS unified_timeline_fts_update AFTER UPDATE ON unified_timeline BEGIN
+    INSERT INTO unified_timeline_fts(unified_timeline_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+    INSERT INTO unified_timeline_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
 """
 
@@ -329,6 +366,14 @@ class SessionDB:
                     except sqlite3.OperationalError:
                         pass  # Column already exists
                 cursor.execute("UPDATE schema_version SET version = 6")
+            if current_version < 7:
+                # v7: add unified_timeline table + FTS + lookup index.
+                # CREATE TABLE IF NOT EXISTS is idempotent, so executing
+                # SCHEMA_SQL again at this point is safe — and the simplest
+                # way to guarantee the new table exists on upgrade paths.
+                cursor.executescript(SCHEMA_SQL)
+                cursor.executescript(FTS_SQL)
+                cursor.execute("UPDATE schema_version SET version = 7")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
