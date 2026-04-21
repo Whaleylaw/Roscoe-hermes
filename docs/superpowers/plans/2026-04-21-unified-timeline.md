@@ -1172,17 +1172,13 @@ In `gateway/session.py`, modify `SessionStore.load_transcript` (starting at line
 Run: `python3.11 -m pytest tests/gateway/test_unified_timeline.py tests/gateway/test_session.py -q`
 Expected: PASS.
 
-- [ ] **Step 5: Clean up Task 7's now-redundant branching**
+- [ ] **Step 5: ~~Clean up Task 7's now-redundant branching~~ (obviated — see note)**
 
-In `gateway/platforms/api_server.py` (the change from Task 7 Step 3), simplify the history-load block. Since `load_transcript` now handles the flag internally, `api_server.py` can just call:
-
-```python
-                    history = self._session_store.load_transcript(session_id)
-```
+**Implementation note:** this step is obviated. The T7 fix commit (`456b5196`) already extracted the row-to-OpenAI mapping into `_timeline_rows_to_openai_messages` in `gateway/session.py`, which both `SessionStore.load_timeline_conversation` and `APIServerAdapter._load_unified_timeline_history` call. The adapter's branch in `api_server.py` is not dead weight — it still has to discriminate between the profile timeline and the request-body-supplied `conversation_history` that Open WebUI and LobeChat send. Collapsing to `load_transcript(session_id)` would lose that discrimination. No change to api_server is needed in T7b.
 
 Run the api_server tests to confirm parity:
 
-Run: `python3.11 -m pytest tests/gateway/test_api_server.py -q`
+Run: `.venv/bin/python -m pytest tests/gateway/test_api_server.py -q`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
