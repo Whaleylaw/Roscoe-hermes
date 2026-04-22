@@ -88,7 +88,9 @@ def test_load_timeline_conversation_returns_openai_shape(tmp_path: Path):
     db.close()
 
 
-def test_load_transcript_routes_through_timeline_when_enabled(tmp_path, monkeypatch):
+def test_load_agent_context_routes_through_timeline_when_enabled(tmp_path, monkeypatch):
+    """With unified_timeline enabled, load_agent_context must pull the
+    profile's cross-channel timeline rather than the per-session store."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
 
@@ -102,16 +104,16 @@ def test_load_transcript_routes_through_timeline_when_enabled(tmp_path, monkeypa
     store = SessionStore(sessions_dir=tmp_path / "sessions", config=cfg)
     store._db = db
 
-    # load_transcript should return the unified timeline, not the empty
-    # per-session transcript.
-    msgs = store.load_transcript(session_id="any-legacy-id")
+    msgs = store.load_agent_context(source=_source())
     contents = [m["content"] for m in msgs]
     assert "unified-content" in contents
     assert "agent-reply" in contents
     db.close()
 
 
-def test_load_transcript_uses_legacy_path_when_flag_disabled(tmp_path, monkeypatch):
+def test_load_agent_context_uses_legacy_path_when_flag_disabled(tmp_path, monkeypatch):
+    """With unified_timeline disabled, load_agent_context falls back to
+    the per-session transcript and ignores timeline rows."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
 
@@ -119,12 +121,180 @@ def test_load_transcript_uses_legacy_path_when_flag_disabled(tmp_path, monkeypat
     ut = UnifiedTimeline(db=db, profile_id="default")
     ut.record_inbound(source=_source(), content="ignored", message_id="m1")
 
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
     cfg = GatewayConfig(unified_timeline=UnifiedTimelineConfig(enabled=False))
+    with patch("gateway.session.SessionStore._ensure_loaded"):
+        store = SessionStore(sessions_dir=sessions_dir, config=cfg)
+    store._db = None
+    store._loaded = True
+
+    # Seed a per-session transcript so the legacy reader returns
+    # something distinguishable from the timeline row.
+    store.append_to_transcript(
+        "legacy-session-id",
+        {"role": "user", "content": "legacy-content"},
+    )
+
+    from datetime import datetime as _dt
+    from gateway.session import SessionEntry
+    entry = SessionEntry(
+        session_key="k",
+        session_id="legacy-session-id",
+        created_at=_dt.now(),
+        updated_at=_dt.now(),
+    )
+    msgs = store.load_agent_context(source=_source(), session_entry=entry)
+    contents = [m["content"] for m in msgs]
+    assert "legacy-content" in contents
+    assert "ignored" not in contents
+    db.close()
+
+
+def test_load_transcript_is_per_session_regardless_of_flag(tmp_path, monkeypatch):
+    """Regression for #Critical-1: load_transcript must ALWAYS return
+    the per-session transcript so mutation commands (/retry, /undo,
+    /compress, /branch) can truncate and rewrite a specific session."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    ut = UnifiedTimeline(db=db, profile_id="default")
+    ut.record_inbound(source=_source(), content="cross-channel-content", message_id="m1")
+
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    cfg = GatewayConfig()  # unified_timeline default-on
+    with patch("gateway.session.SessionStore._ensure_loaded"):
+        store = SessionStore(sessions_dir=sessions_dir, config=cfg)
+    store._db = None
+    store._loaded = True
+    store.append_to_transcript(
+        "legacy-session-id",
+        {"role": "user", "content": "per-session-content"},
+    )
+
+    msgs = store.load_transcript("legacy-session-id")
+    contents = [m["content"] for m in msgs]
+    assert "per-session-content" in contents
+    # The timeline row must not bleed into a per-session read — otherwise
+    # /retry would rewrite a phantom session.
+    assert "cross-channel-content" not in contents
+    db.close()
+
+
+def test_truncate_timeline_last_exchange_drops_trailing_rows(tmp_path, monkeypatch):
+    """Dropping the last exchange must remove the last user message +
+    every row that followed it (its assistant reply, cross-channel
+    intrusions, etc.)."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    ut = UnifiedTimeline(db=db, profile_id="default")
+    h1 = ut.record_inbound(source=_source(), content="turn A", message_id="m1")
+    ut.record_outbound(turn=h1, content="reply A")
+    h2 = ut.record_inbound(source=_source(), content="turn B", message_id="m2")
+    ut.record_outbound(turn=h2, content="reply B")
+
+    cfg = GatewayConfig()
     store = SessionStore(sessions_dir=tmp_path / "sessions", config=cfg)
     store._db = db
-    # No legacy per-session messages exist, so result is empty —
-    # importantly, does NOT contain the unified timeline entry.
-    msgs = store.load_transcript(session_id="any-legacy-id")
-    contents = [m["content"] for m in msgs]
-    assert "ignored" not in contents
+
+    removed = store.truncate_timeline_last_exchange(profile_id="default")
+    assert removed == 2  # turn B + reply B
+
+    rows = db.get_timeline_messages(profile_id="default")
+    contents = [r["content"] for r in rows]
+    assert contents == ["turn A", "reply A"]
+    db.close()
+
+
+def test_retry_truncates_cross_channel_timeline_and_per_session_transcript(
+    tmp_path, monkeypatch,
+):
+    """Regression for Critical #1 fallout:
+
+    Scenario: user sends turn A on Telegram, agent replies; user
+    sends turn B on Telegram; then user issues /retry.  After /retry,
+    both the per-session transcript *and* the unified timeline must
+    reflect only turn A + turn A's reply — otherwise the next turn's
+    cross-channel context resurrects turn B.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from gateway.platforms.base import MessageEvent, MessageType
+    from gateway.run import GatewayRunner
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+
+    cfg = GatewayConfig()  # unified_timeline default-on
+    db = SessionDB(db_path=tmp_path / "state.db")
+    with patch("gateway.session.SessionStore._ensure_loaded"):
+        store = SessionStore(sessions_dir=tmp_path, config=cfg)
+    store._db = db
+    store._loaded = True
+
+    session_id = "tg-session"
+    # Seed per-session transcript: turn A, reply A, turn B, reply B.
+    for msg in [
+        {"role": "user", "content": "turn A"},
+        {"role": "assistant", "content": "reply A"},
+        {"role": "user", "content": "turn B"},
+        {"role": "assistant", "content": "reply B"},
+    ]:
+        store.append_to_transcript(session_id, msg)
+
+    # Seed unified timeline with the same pair of exchanges.
+    ut = UnifiedTimeline(db=db, profile_id="default")
+    src = _source()
+    h1 = ut.record_inbound(source=src, content="turn A", message_id="m1")
+    ut.record_outbound(turn=h1, content="reply A")
+    h2 = ut.record_inbound(source=src, content="turn B", message_id="m2")
+    ut.record_outbound(turn=h2, content="reply B")
+    assert len(db.get_timeline_messages(profile_id="default")) == 4
+
+    gw = GatewayRunner.__new__(GatewayRunner)
+    gw.config = cfg
+    gw.session_store = store
+
+    session_entry = MagicMock(session_id=session_id)
+    session_entry.last_prompt_tokens = 99
+    gw.session_store.get_or_create_session = MagicMock(return_value=session_entry)
+
+    async def fake_handle_message(event):
+        assert event.text == "turn B"
+        # Re-do the pair so the session looks just like it did before
+        # the retry — per-session + timeline should both reflect A and B.
+        store.append_to_transcript(session_id, {"role": "user", "content": event.text})
+        store.append_to_transcript(session_id, {"role": "assistant", "content": "reply B'"})
+        return "reply B'"
+
+    gw._handle_message = AsyncMock(side_effect=fake_handle_message)
+
+    asyncio.run(
+        gw._handle_retry_command(
+            MessageEvent(text="/retry", message_type=MessageType.TEXT, source=MagicMock()),
+        )
+    )
+
+    # After /retry: next-turn agent context (load_agent_context) must
+    # include turn A + reply A + the replayed turn B + new reply — NOT
+    # the stale pre-retry "reply B".
+    rows = db.get_timeline_messages(profile_id="default")
+    contents = [r["content"] for r in rows]
+    # Truncation removed the stale last exchange...
+    assert "reply B" not in contents, (
+        "unified timeline still contains pre-retry assistant reply — "
+        "truncate_timeline_last_exchange did not run"
+    )
+    # ...and turn A survived.
+    assert contents[:2] == ["turn A", "reply A"]
+
+    # Per-session store mirrors the same truncation.
+    per_session = store.load_transcript(session_id)
+    per_session_contents = [m["content"] for m in per_session]
+    assert per_session_contents[-1] == "reply B'"
+    assert "reply B" not in per_session_contents
     db.close()

@@ -1076,6 +1076,50 @@ class SessionDB:
             return seq
         return self._execute_write(_do)
 
+    def get_last_inbound_seq(self, profile_id: str) -> Optional[int]:
+        """Return the seq of the most recent inbound row for a profile.
+
+        Returns ``None`` when the profile's timeline has no inbound rows
+        yet.  Used by mutation commands (``/retry``, ``/undo``) that
+        need to truncate the timeline back to before the last user
+        message.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(seq) FROM unified_timeline "
+                "WHERE profile_id = ? AND direction = 'inbound' "
+                "AND salience = 'primary'",
+                (profile_id,),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+
+    def truncate_timeline_after(
+        self, profile_id: str, seq: int, *, inclusive: bool = True,
+    ) -> int:
+        """Delete timeline rows at or after ``seq`` for ``profile_id``.
+
+        When ``inclusive=True`` (default), rows with ``seq >= seq`` are
+        removed — used by ``/retry`` / ``/undo`` to drop the last user
+        message and everything after it from the cross-channel log.
+        When ``inclusive=False``, only rows with ``seq > seq`` are
+        removed (useful when the caller wants to keep the row at
+        ``seq`` itself, e.g. truncating assistant replies to a retained
+        user turn).
+
+        Returns the number of rows deleted.
+        """
+        op = ">=" if inclusive else ">"
+        def _do(conn):
+            cursor = conn.execute(
+                f"DELETE FROM unified_timeline "
+                f"WHERE profile_id = ? AND seq {op} ?",
+                (profile_id, seq),
+            )
+            return cursor.rowcount
+        return self._execute_write(_do)
+
     def get_timeline_messages(
         self,
         profile_id: str,

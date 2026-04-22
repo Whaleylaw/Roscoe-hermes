@@ -344,7 +344,12 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
         platform=Platform.TELEGRAM,
         chat_type="group",
     )
-    runner.session_store.load_transcript.return_value = _make_history(6, content_size=400)
+    # With unified_timeline default-on, the runner calls
+    # load_agent_context for the turn-assembly read.  Mock both so the
+    # test works regardless of which path the production code uses.
+    _preseed_history = _make_history(6, content_size=400)
+    runner.session_store.load_transcript.return_value = _preseed_history
+    runner.session_store.load_agent_context.return_value = _preseed_history
     runner.session_store.has_any_sessions.return_value = True
     runner.session_store.rewrite_transcript = MagicMock()
     runner.session_store.append_to_transcript = MagicMock()

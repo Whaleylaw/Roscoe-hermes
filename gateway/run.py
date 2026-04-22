@@ -4128,9 +4128,16 @@ class GatewayRunner:
             except Exception as e:
                 logger.warning("[Gateway] Failed to auto-load skill(s) %s: %s", _skill_names, e)
 
-        # Load conversation history from transcript
-        history = self.session_store.load_transcript(session_entry.session_id)
-        
+        # Load the agent's conversational context for this turn.  When
+        # the unified timeline is enabled this is the profile-wide
+        # cross-channel history; otherwise it's the per-session
+        # transcript.  The call is explicit so mutation commands
+        # (``/retry``, ``/undo``, ...) can keep using load_transcript
+        # directly against the per-session store.
+        history = self.session_store.load_agent_context(
+            source=source, session_entry=session_entry,
+        )
+
         # -----------------------------------------------------------------
         # Session hygiene: auto-compress pathologically large transcripts
         #
@@ -5909,7 +5916,7 @@ class GatewayRunner:
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
         history = self.session_store.load_transcript(session_entry.session_id)
-        
+
         # Find the last user message
         last_user_msg = None
         last_user_idx = None
@@ -5918,15 +5925,23 @@ class GatewayRunner:
                 last_user_msg = history[i].get("content", "")
                 last_user_idx = i
                 break
-        
+
         if not last_user_msg:
             return "No previous message to retry."
-        
+
         # Truncate history to before the last user message and persist
         truncated = history[:last_user_idx]
         self.session_store.rewrite_transcript(session_entry.session_id, truncated)
         # Reset stored token count — transcript was truncated
         session_entry.last_prompt_tokens = 0
+        # Also drop the last exchange from the profile's unified
+        # timeline so the next turn's cross-channel context matches the
+        # truncated per-session transcript.  No-op when the feature is
+        # off.
+        try:
+            self.session_store.truncate_timeline_last_exchange()
+        except Exception as e:
+            logger.debug("Timeline truncation on /retry failed: %s", e)
         
         # Re-send by creating a fake text event with the old message
         retry_event = MessageEvent(
@@ -5961,6 +5976,13 @@ class GatewayRunner:
         self.session_store.rewrite_transcript(session_entry.session_id, history[:last_user_idx])
         # Reset stored token count — transcript was truncated
         session_entry.last_prompt_tokens = 0
+        # Cross-channel: drop the same exchange from the unified
+        # timeline so the next agent turn doesn't re-read the undone
+        # pair from another channel's context.
+        try:
+            self.session_store.truncate_timeline_last_exchange()
+        except Exception as e:
+            logger.debug("Timeline truncation on /undo failed: %s", e)
         
         preview = removed_msg[:40] + "..." if len(removed_msg) > 40 else removed_msg
         return f"↩️ Undid {removed_count} message(s).\nRemoved: \"{preview}\""
@@ -6711,13 +6733,18 @@ class GatewayRunner:
             turn_route = self._resolve_turn_agent_config(question, model, runtime_kwargs)
             pr = self._provider_routing
 
-            # Snapshot history from running agent or stored transcript
+            # Snapshot history from running agent or the agent-context
+            # loader (which picks the unified timeline when enabled so
+            # /btw sees the same cross-channel context the next real
+            # turn would).
             running_agent = self._running_agents.get(session_key)
             if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
                 history_snapshot = list(getattr(running_agent, "_session_messages", []) or [])
             else:
                 session_entry = self.session_store.get_or_create_session(source)
-                history_snapshot = self.session_store.load_transcript(session_entry.session_id)
+                history_snapshot = self.session_store.load_agent_context(
+                    source=source, session_entry=session_entry,
+                )
 
             btw_prompt = (
                 "[Ephemeral /btw side question. Answer using the conversation "

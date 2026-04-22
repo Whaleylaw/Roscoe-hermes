@@ -1214,21 +1214,19 @@ class SessionStore:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
-        """Load messages for the agent to consume.
+        """Load all messages from a session's transcript.
 
-        When ``unified_timeline`` is enabled (the default), returns the
-        profile's unified timeline in OpenAI conversation format — the
-        agent has one continuous memory across every channel it is
-        reachable on. When disabled, falls back to the legacy per-session
-        transcript (SQLite + JSONL fallback).
+        Returns the *per-session* transcript — the conversation stored
+        under ``session_id``.  Used by mutation / introspection paths
+        (``/retry``, ``/undo``, ``/compress``, ``/branch``, ``/resume``,
+        memory flush, ``/usage``) that need to read or rewrite a
+        specific session's own history.
+
+        Callers that want the agent's *conversational context* for the
+        next turn (which spans every channel the profile is reachable
+        on when the unified timeline is enabled) should instead call
+        :meth:`load_agent_context`.
         """
-        if getattr(self.config, "unified_timeline", None) and self.config.unified_timeline.enabled:
-            from hermes_cli.profiles import get_active_profile_name
-            return self.load_timeline_conversation(
-                profile_id=get_active_profile_name(),
-            )
-
-        # Legacy path — preserved exactly as before for the disabled case.
         db_messages = []
         # Try SQLite first
         if self._db:
@@ -1275,6 +1273,84 @@ class SessionStore:
 
         return db_messages
 
+    def load_agent_context(
+        self,
+        source: Optional[SessionSource] = None,
+        session_entry: Optional[SessionEntry] = None,
+    ) -> List[Dict[str, Any]]:
+        """Load the conversational context the agent should see for this turn.
+
+        When the unified timeline is enabled (default), returns the
+        active profile's cross-channel timeline in OpenAI conversation
+        format — the agent has one continuous memory across every
+        channel it is reachable on.  When disabled, falls back to the
+        per-session transcript loaded via :meth:`load_transcript`.
+
+        This is the method callers should use for "what does the agent
+        see next turn?".  Mutation / introspection paths that need to
+        read or rewrite a *specific* session's history should continue
+        to use :meth:`load_transcript` directly.
+
+        ``source`` is accepted for future use (e.g. profile resolution
+        keyed off the source platform); currently the active profile is
+        inferred from ``HERMES_HOME``.  ``session_entry`` supplies the
+        fallback per-session identifier when the timeline is disabled.
+        """
+        if (
+            getattr(self.config, "unified_timeline", None)
+            and self.config.unified_timeline.enabled
+        ):
+            from hermes_cli.profiles import get_active_profile_name
+            return self.load_timeline_conversation(
+                profile_id=get_active_profile_name(),
+            )
+
+        session_id = session_entry.session_id if session_entry else None
+        if not session_id:
+            return []
+        return self.load_transcript(session_id)
+
+    def truncate_timeline_last_exchange(
+        self, profile_id: Optional[str] = None,
+    ) -> int:
+        """Drop the last user message + everything after it from the timeline.
+
+        Mirrors the ``/retry`` / ``/undo`` semantics applied to the
+        per-session transcript: find the most recent inbound row in the
+        profile's unified timeline and delete it together with every
+        row that followed (i.e. the assistant reply, any subsequent
+        turns that occurred on other channels, etc.).
+
+        No-op when the unified timeline is disabled or when there is no
+        inbound row yet.  Returns the number of rows deleted.
+        """
+        if not (
+            getattr(self.config, "unified_timeline", None)
+            and self.config.unified_timeline.enabled
+        ):
+            return 0
+        if not self._db:
+            return 0
+        if profile_id is None:
+            from hermes_cli.profiles import get_active_profile_name
+            profile_id = get_active_profile_name()
+        try:
+            last_seq = self._db.get_last_inbound_seq(profile_id)
+        except Exception as e:
+            logger.warning("Failed to locate last inbound seq for %s: %s",
+                           profile_id, e)
+            return 0
+        if last_seq is None:
+            return 0
+        try:
+            return self._db.truncate_timeline_after(
+                profile_id=profile_id, seq=last_seq, inclusive=True,
+            )
+        except Exception as e:
+            logger.warning("Failed to truncate timeline for %s: %s",
+                           profile_id, e)
+            return 0
+
     def load_timeline_conversation(
         self, profile_id: str, limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
@@ -1282,7 +1358,7 @@ class SessionStore:
 
         Returns a list of ``{"role": "user"|"assistant", "content": str}``
         dicts in chronological order. This is the cross-channel analog of
-        :meth:`load_transcript` and is the new source of truth for agent
+        :meth:`load_transcript` and is the source of truth for agent
         context when the unified timeline is enabled.
         """
         if not self._db:

@@ -17,7 +17,7 @@ Covers:
 import pytest
 from unittest.mock import patch
 
-from gateway.config import Platform, GatewayConfig, UnifiedTimelineConfig
+from gateway.config import Platform, GatewayConfig
 from gateway.session import SessionSource, SessionStore, build_session_key
 
 
@@ -26,12 +26,11 @@ def store(tmp_path):
     """SessionStore with no SQLite, for fast unit tests.
 
     Thread-isolation semantics are a property of the *per-session*
-    transcript; disable the unified timeline flag so ``load_transcript``
-    reads per-session state instead of the cross-channel timeline.
+    transcript; these tests call ``load_transcript`` directly (not
+    ``load_agent_context``), so the unified timeline flag is immaterial
+    and the default-on config is fine.
     """
-    config = GatewayConfig(
-        unified_timeline=UnifiedTimelineConfig(enabled=False),
-    )
+    config = GatewayConfig()
     with patch("gateway.session.SessionStore._ensure_loaded"):
         s = SessionStore(sessions_dir=tmp_path, config=config)
     s._db = None
