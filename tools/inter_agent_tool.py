@@ -161,3 +161,69 @@ def _rpc_post(base_url: str, method: str, params: Dict[str, Any],
         return None, f"JSON-RPC {err.get('code')}: {err.get('message')}"
 
     return data.get("result"), None
+
+
+# ---------------------------------------------------------------------------
+# list_agents
+# ---------------------------------------------------------------------------
+
+def _probe_health(a2a_url: str) -> bool:
+    health_url = a2a_url.rstrip("/") + "/health"
+    try:
+        with urllib.request.urlopen(health_url, timeout=HEALTH_FANOUT_TIMEOUT_SECONDS) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return bool(data.get("ok"))
+    except Exception:
+        return False
+
+
+def list_agents() -> str:
+    """Return registered peer agents with live online/offline status."""
+    self_id = _get_self_id()
+    entries = [e for e in _load_registry() if e.get("id") != self_id]
+
+    urls = [e.get("a2a_url", "") for e in entries]
+    with ThreadPoolExecutor(max_workers=HEALTH_FANOUT_WORKERS) as pool:
+        online_flags = list(pool.map(_probe_health, urls))
+
+    agents_out = []
+    for entry, online in zip(entries, online_flags):
+        agents_out.append({
+            "id": entry.get("id"),
+            "name": entry.get("name"),
+            "description": entry.get("description", ""),
+            "a2a_url": entry.get("a2a_url"),
+            "skills": entry.get("skills", []),
+            "online": online,
+        })
+    return json.dumps({"agents": agents_out}, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Schemas
+# ---------------------------------------------------------------------------
+
+LIST_AGENTS_SCHEMA = {
+    "name": "list_agents",
+    "description": (
+        "List peer Hermes agents available over the A2A bridge, with live "
+        "online/offline status. Use this before ask_agent or "
+        "dispatch_agent_task to pick a target."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+
+from tools.registry import registry, tool_error  # noqa: E402
+
+registry.register(
+    name="list_agents",
+    toolset="inter_agent",
+    schema=LIST_AGENTS_SCHEMA,
+    handler=lambda args, **kw: list_agents(),
+    check_fn=_check_inter_agent_available,
+    emoji="👥",
+)

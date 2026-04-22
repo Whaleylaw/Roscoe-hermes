@@ -195,3 +195,46 @@ class TestRpcPost:
         result, err = _rpc_post("http://127.0.0.1:18801", "tasks/get", {})
         assert result is None
         assert "malformed" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# list_agents
+# ---------------------------------------------------------------------------
+
+class TestListAgents:
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_happy_path_marks_online(self, mock_fn, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        monkeypatch.delenv("HERMES_A2A_SELF", raising=False)
+        mock_fn.return_value = _mock_urlopen({"ok": True, "agent": "paralegal"})
+        from tools.inter_agent_tool import list_agents
+        result = json.loads(list_agents())
+        assert "agents" in result
+        ids = [a["id"] for a in result["agents"]]
+        assert "roscoe" in ids
+        assert "paralegal" in ids
+        for a in result["agents"]:
+            assert a["online"] is True
+
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_offline_peer(self, mock_fn, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        mock_fn.side_effect = urllib.error.URLError("refused")
+        from tools.inter_agent_tool import list_agents
+        result = json.loads(list_agents())
+        for a in result["agents"]:
+            assert a["online"] is False
+
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_self_filter(self, mock_fn, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        monkeypatch.setenv("HERMES_A2A_SELF", "roscoe")
+        mock_fn.return_value = _mock_urlopen({"ok": True})
+        from tools.inter_agent_tool import list_agents
+        result = json.loads(list_agents())
+        ids = [a["id"] for a in result["agents"]]
+        assert "roscoe" not in ids
+        assert "paralegal" in ids
