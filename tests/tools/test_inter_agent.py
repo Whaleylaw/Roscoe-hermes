@@ -1,0 +1,126 @@
+"""Tests for the inter-agent toolset."""
+
+import json
+import os
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Registry fixture
+# ---------------------------------------------------------------------------
+
+REGISTRY_FIXTURE = {
+    "version": 2,
+    "agents": [
+        {
+            "id": "roscoe",
+            "name": "Roscoe",
+            "source": "hermes",
+            "hermes_profile": "default",
+            "hermes_port": 8642,
+            "hermes_model": "Roscoe",
+            "a2a_url": "http://127.0.0.1:18800",
+            "a2a_port": 18800,
+            "auth_env": "HERMES_TOKEN",
+            "description": "Roscoe default profile.",
+            "skills": [{"id": "legal", "name": "Legal"}],
+        },
+        {
+            "id": "paralegal",
+            "name": "Paralegal",
+            "source": "hermes",
+            "hermes_profile": "paralegal",
+            "hermes_port": 8643,
+            "hermes_model": "paralegal",
+            "a2a_url": "http://127.0.0.1:18801",
+            "a2a_port": 18801,
+            "auth_env": "HERMES_TOKEN",
+            "description": "Paralegal profile.",
+            "skills": [{"id": "case-support", "name": "Case Support"}],
+        },
+        {
+            "id": "not-hermes",
+            "source": "other",
+            "a2a_url": "http://127.0.0.1:9999",
+        },
+    ],
+}
+
+
+@pytest.fixture
+def registry_file(tmp_path):
+    path = tmp_path / "agents.registry.json"
+    path.write_text(json.dumps(REGISTRY_FIXTURE))
+    return str(path)
+
+
+# ---------------------------------------------------------------------------
+# check_fn
+# ---------------------------------------------------------------------------
+
+class TestCheckAvailable:
+    def test_false_when_token_missing(self, monkeypatch, registry_file):
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        monkeypatch.delenv("HERMES_TOKEN", raising=False)
+        from tools.inter_agent_tool import _check_inter_agent_available
+        assert _check_inter_agent_available() is False
+
+    def test_false_when_registry_path_missing(self, monkeypatch):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.delenv("A2A_REGISTRY_PATH", raising=False)
+        from tools.inter_agent_tool import _check_inter_agent_available
+        assert _check_inter_agent_available() is False
+
+    def test_false_when_registry_file_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", str(tmp_path / "nope.json"))
+        from tools.inter_agent_tool import _check_inter_agent_available
+        assert _check_inter_agent_available() is False
+
+    def test_true_when_all_set(self, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        from tools.inter_agent_tool import _check_inter_agent_available
+        assert _check_inter_agent_available() is True
+
+
+# ---------------------------------------------------------------------------
+# Registry loader
+# ---------------------------------------------------------------------------
+
+class TestLoadRegistry:
+    def test_filters_to_hermes_source(self, monkeypatch, registry_file):
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        from tools.inter_agent_tool import _load_registry
+        agents = _load_registry()
+        ids = [a["id"] for a in agents]
+        assert "roscoe" in ids
+        assert "paralegal" in ids
+        assert "not-hermes" not in ids
+
+    def test_returns_empty_when_unreadable(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("A2A_REGISTRY_PATH", str(tmp_path / "missing.json"))
+        from tools.inter_agent_tool import _load_registry
+        assert _load_registry() == []
+
+
+# ---------------------------------------------------------------------------
+# Agent resolution
+# ---------------------------------------------------------------------------
+
+class TestResolveAgent:
+    def test_found(self, monkeypatch, registry_file):
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        from tools.inter_agent_tool import _resolve_agent
+        entry = _resolve_agent("paralegal")
+        assert entry is not None
+        assert entry["a2a_url"] == "http://127.0.0.1:18801"
+
+    def test_unknown(self, monkeypatch, registry_file):
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        from tools.inter_agent_tool import _resolve_agent
+        assert _resolve_agent("nope") is None
