@@ -174,6 +174,10 @@ def make_runner(platform: Platform, session_entry: SessionEntry = None) -> "Gate
     runner.session_store = MagicMock()
     runner.session_store.get_or_create_session.return_value = session_entry
     runner.session_store.load_transcript.return_value = []
+    # Agent-context loader (used by the turn-assembly path when the
+    # unified timeline is enabled).  Default to the same empty list so
+    # the test harness doesn't depend on which loader the runner uses.
+    runner.session_store.load_agent_context.return_value = []
     runner.session_store.has_any_sessions.return_value = True
     runner.session_store.append_to_transcript = MagicMock()
     runner.session_store.rewrite_transcript = MagicMock()

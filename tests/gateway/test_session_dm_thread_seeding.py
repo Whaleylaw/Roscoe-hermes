@@ -23,7 +23,13 @@ from gateway.session import SessionSource, SessionStore, build_session_key
 
 @pytest.fixture()
 def store(tmp_path):
-    """SessionStore with no SQLite, for fast unit tests."""
+    """SessionStore with no SQLite, for fast unit tests.
+
+    Thread-isolation semantics are a property of the *per-session*
+    transcript; these tests call ``load_transcript`` directly (not
+    ``load_agent_context``), so the unified timeline flag is immaterial
+    and the default-on config is fine.
+    """
     config = GatewayConfig()
     with patch("gateway.session.SessionStore._ensure_loaded"):
         s = SessionStore(sessions_dir=tmp_path, config=config)

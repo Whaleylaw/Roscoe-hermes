@@ -389,6 +389,8 @@ class TestSessionStoreRewriteTranscript:
 
     @pytest.fixture()
     def store(self, tmp_path):
+        # These tests call ``load_transcript`` directly — the
+        # per-session path — so unified_timeline.enabled is irrelevant.
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)
@@ -434,6 +436,8 @@ class TestLoadTranscriptCorruptLines:
 
     @pytest.fixture()
     def store(self, tmp_path):
+        # Direct ``load_transcript`` call — per-session JSONL path —
+        # the unified timeline flag is irrelevant for these tests.
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)
@@ -487,6 +491,9 @@ class TestLoadTranscriptPreferLongerSource:
         """SessionStore with both SQLite and JSONL active."""
         from hermes_state import SessionDB
 
+        # These tests call ``load_transcript`` directly to exercise the
+        # prefer-longer-source logic between SQLite and JSONL; that code
+        # path is independent of the unified timeline flag.
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)

@@ -287,6 +287,7 @@ from gateway.platforms.base import (
     MessageType,
     merge_pending_message_event,
 )
+from gateway.unified_timeline import UnifiedTimeline, TurnHandle
 from gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
@@ -589,6 +590,35 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
         return text
 
     return None
+
+
+def maybe_run_unified_timeline_migration() -> None:
+    """Run the one-shot legacy → unified_timeline migration if needed.
+
+    ``migrate()`` itself writes the flag file at
+    ``HERMES_HOME/.unified_timeline_migrated`` on successful completion;
+    subsequent gateway starts see the flag and return early. If a
+    migration fails (no flag written), the next startup will retry —
+    which is correct: the migrator is idempotent, and a visible re-run
+    beats a silent paper-over. Manual reruns via
+    ``scripts/migrate_to_unified_timeline.py`` are always safe.
+    """
+    from hermes_constants import get_hermes_home
+    from hermes_cli.profiles import get_active_profile_name
+    flag = get_hermes_home() / ".unified_timeline_migrated"
+    if flag.exists():
+        return
+    try:
+        from scripts.migrate_to_unified_timeline import migrate
+        migrate(profile_id=get_active_profile_name())
+    except Exception as exc:
+        # Migration is best-effort — failure should not block the gateway
+        # from starting. The unified_timeline table still works for new
+        # messages; legacy history just won't be backfilled.
+        import logging
+        logging.getLogger(__name__).warning(
+            "unified_timeline migration failed: %s — continuing startup", exc,
+        )
 
 
 class GatewayRunner:
@@ -1917,6 +1947,23 @@ class GatewayRunner:
             write_runtime_status(gateway_state="starting", exit_reason=None)
         except Exception:
             pass
+
+        # T10: One-shot backfill of legacy transcripts into the
+        # ``unified_timeline`` table. Guarded by a flag file in
+        # HERMES_HOME so subsequent starts skip the walk. Gated on
+        # ``unified_timeline.enabled`` so sites on the rollback path
+        # (T5) don't pay the startup cost.
+        try:
+            if (
+                getattr(self.config, "unified_timeline", None)
+                and self.config.unified_timeline.enabled
+            ):
+                maybe_run_unified_timeline_migration()
+        except Exception as _ut_mig_err:
+            logger.warning(
+                "unified_timeline startup migration hook failed: %s",
+                _ut_mig_err,
+            )
         
         # Warn if no user allowlists are configured and open access is not opted in
         _any_allowlist = any(
@@ -2804,7 +2851,15 @@ class GatewayRunner:
             if not check_api_server_requirements():
                 logger.warning("API Server: aiohttp not installed")
                 return None
-            return APIServerAdapter(config)
+            adapter = APIServerAdapter(config)
+            # Inject the gateway-level config so feature flags like
+            # ``unified_timeline.enabled`` don't need to be lazy-loaded
+            # inside each request handler.
+            try:
+                adapter.set_gateway_config(self.config)
+            except Exception as e:
+                logger.debug("API Server: could not inject gateway config: %s", e)
+            return adapter
 
         elif platform == Platform.WEBHOOK:
             from gateway.platforms.webhook import WebhookAdapter, check_webhook_requirements
@@ -3897,6 +3952,35 @@ class GatewayRunner:
 
         return message_text
 
+    def _record_error_outbound(
+        self,
+        turn_handle: Optional[TurnHandle],
+        ut: Optional[UnifiedTimeline],
+        err_response: str,
+    ) -> None:
+        """Record an error-path outbound reply on the unified timeline.
+
+        Mirrors the happy-path record at the end of
+        ``_handle_message_with_agent`` so user-visible error messages
+        close the turn — otherwise the agent's timeline shows an
+        inbound with no reply, and on the next turn the agent believes
+        its last utterance was from two turns ago.
+
+        Best-effort: no-op when the timeline is disabled, when the
+        inbound never recorded (``turn_handle is None``), or when the
+        error response is empty.  Failures log a warning and never
+        break the already-failing turn.
+        """
+        if turn_handle is None or ut is None or not err_response:
+            return
+        try:
+            ut.record_outbound(turn=turn_handle, content=err_response)
+        except Exception as _ut_err:
+            logger.warning(
+                "unified_timeline record_outbound (error path) failed: %s",
+                _ut_err,
+            )
+
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -4044,9 +4128,16 @@ class GatewayRunner:
             except Exception as e:
                 logger.warning("[Gateway] Failed to auto-load skill(s) %s: %s", _skill_names, e)
 
-        # Load conversation history from transcript
-        history = self.session_store.load_transcript(session_entry.session_id)
-        
+        # Load the agent's conversational context for this turn.  When
+        # the unified timeline is enabled this is the profile-wide
+        # cross-channel history; otherwise it's the per-session
+        # transcript.  The call is explicit so mutation commands
+        # (``/retry``, ``/undo``, ...) can keep using load_transcript
+        # directly against the per-session store.
+        history = self.session_store.load_agent_context(
+            source=source, session_entry=session_entry,
+        )
+
         # -----------------------------------------------------------------
         # Session hygiene: auto-compress pathologically large transcripts
         #
@@ -4354,6 +4445,13 @@ class GatewayRunner:
         if message_text is None:
             return
 
+        # Unified-timeline handle — bound below, after the stale-run check,
+        # so discarded stale runs don't leave orphan inbound rows that a
+        # subsequent live run would duplicate.  Declared here so the outer
+        # exception handler can reach it.
+        turn_handle: Optional[TurnHandle] = None
+        ut: Optional[UnifiedTimeline] = None
+
         # Bind this gateway run generation to the adapter's active-session
         # event so deferred post-delivery callbacks can be released by the
         # same run that registered them.
@@ -4409,6 +4507,31 @@ class GatewayRunner:
                 elif _stale_adapter and hasattr(_stale_adapter, "_post_delivery_callbacks"):
                     _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
                 return None
+
+            # Record the inbound turn on the unified timeline now that we
+            # know this run is the one that will produce the response.
+            # Placing the write after the stale-run guard prevents orphan
+            # inbound rows (the newer live run would re-record the same
+            # user message, double-logging the turn).
+            # Default-on in GatewayConfig (T5); can be disabled via
+            # ``gateway.unified_timeline.enabled=false`` for rollback.
+            if (
+                getattr(self.config, "unified_timeline", None)
+                and self.config.unified_timeline.enabled
+                and self._session_db is not None
+            ):
+                try:
+                    ut = UnifiedTimeline.for_active_profile(db=self._session_db)
+                    turn_handle = ut.record_inbound(
+                        source=source,
+                        content=message_text,
+                        message_id=event.message_id,
+                    )
+                except Exception as _ut_err:
+                    logger.warning(
+                        "unified_timeline record_inbound failed: %s",
+                        _ut_err,
+                    )
 
             response = agent_result.get("final_response") or ""
 
@@ -4512,7 +4635,21 @@ class GatewayRunner:
                 **hook_ctx,
                 "response": (response or "")[:500],
             })
-            
+
+            # Close the unified-timeline loop: the outbound record is tied
+            # to the inbound TurnHandle captured above.  Skipped on empty
+            # responses (streaming already delivered, no content, etc.).
+            # Reuses the ``ut`` resolved at inbound time — saves a second
+            # profile lookup and keeps both records on the same service.
+            if turn_handle is not None and ut is not None and response:
+                try:
+                    ut.record_outbound(turn=turn_handle, content=response)
+                except Exception as _ut_err:
+                    logger.warning(
+                        "unified_timeline record_outbound failed: %s",
+                        _ut_err,
+                    )
+
             # Check for pending process watchers (check_interval on background processes)
             try:
                 from tools.process_registry import process_registry
@@ -4722,19 +4859,23 @@ class GatewayRunner:
                 # 500 with a large session often means the payload is too large
                 # for the API to process — treat it the same way.
                 if _hist_len > 50:
-                    return (
+                    err_response = (
                         "⚠️ Session too large for the model's context window.\n"
                         "Use /compact to compress the conversation, or "
                         "/reset to start fresh."
                     )
+                    self._record_error_outbound(turn_handle, ut, err_response)
+                    return err_response
                 elif status_code == 400:
                     status_hint = " The request was rejected by the API."
-            return (
+            err_response = (
                 f"Sorry, I encountered an error ({error_type}).\n"
                 f"{error_detail}\n"
                 f"{status_hint}"
                 "Try again or use /reset to start a fresh session."
             )
+            self._record_error_outbound(turn_handle, ut, err_response)
+            return err_response
         finally:
             # Restore session context variables to their pre-handler state
             self._clear_session_env(_session_env_tokens)
@@ -5775,7 +5916,7 @@ class GatewayRunner:
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
         history = self.session_store.load_transcript(session_entry.session_id)
-        
+
         # Find the last user message
         last_user_msg = None
         last_user_idx = None
@@ -5784,15 +5925,23 @@ class GatewayRunner:
                 last_user_msg = history[i].get("content", "")
                 last_user_idx = i
                 break
-        
+
         if not last_user_msg:
             return "No previous message to retry."
-        
+
         # Truncate history to before the last user message and persist
         truncated = history[:last_user_idx]
         self.session_store.rewrite_transcript(session_entry.session_id, truncated)
         # Reset stored token count — transcript was truncated
         session_entry.last_prompt_tokens = 0
+        # Also drop the last exchange from the profile's unified
+        # timeline so the next turn's cross-channel context matches the
+        # truncated per-session transcript.  No-op when the feature is
+        # off.
+        try:
+            self.session_store.truncate_timeline_last_exchange()
+        except Exception as e:
+            logger.debug("Timeline truncation on /retry failed: %s", e)
         
         # Re-send by creating a fake text event with the old message
         retry_event = MessageEvent(
@@ -5827,6 +5976,13 @@ class GatewayRunner:
         self.session_store.rewrite_transcript(session_entry.session_id, history[:last_user_idx])
         # Reset stored token count — transcript was truncated
         session_entry.last_prompt_tokens = 0
+        # Cross-channel: drop the same exchange from the unified
+        # timeline so the next agent turn doesn't re-read the undone
+        # pair from another channel's context.
+        try:
+            self.session_store.truncate_timeline_last_exchange()
+        except Exception as e:
+            logger.debug("Timeline truncation on /undo failed: %s", e)
         
         preview = removed_msg[:40] + "..." if len(removed_msg) > 40 else removed_msg
         return f"↩️ Undid {removed_count} message(s).\nRemoved: \"{preview}\""
@@ -6577,13 +6733,18 @@ class GatewayRunner:
             turn_route = self._resolve_turn_agent_config(question, model, runtime_kwargs)
             pr = self._provider_routing
 
-            # Snapshot history from running agent or stored transcript
+            # Snapshot history from running agent or the agent-context
+            # loader (which picks the unified timeline when enabled so
+            # /btw sees the same cross-channel context the next real
+            # turn would).
             running_agent = self._running_agents.get(session_key)
             if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
                 history_snapshot = list(getattr(running_agent, "_session_messages", []) or [])
             else:
                 session_entry = self.session_store.get_or_create_session(source)
-                history_snapshot = self.session_store.load_transcript(session_entry.session_id)
+                history_snapshot = self.session_store.load_agent_context(
+                    source=source, session_entry=session_entry,
+                )
 
             btw_prompt = (
                 "[Ephemeral /btw side question. Answer using the conversation "

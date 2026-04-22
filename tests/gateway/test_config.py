@@ -520,3 +520,28 @@ class TestSessionFunnelEnvOverrides:
 
         assert config.session_funnel.enabled is True
         assert config.session_funnel.strategy == "single-agent-main"
+
+
+import logging
+
+from gateway.config import GatewayConfig, UnifiedTimelineConfig
+
+
+def test_unified_timeline_enabled_by_default():
+    cfg = GatewayConfig()
+    assert cfg.unified_timeline.enabled is True
+
+
+def test_unified_timeline_round_trip():
+    cfg = GatewayConfig(unified_timeline=UnifiedTimelineConfig(enabled=False))
+    restored = GatewayConfig.from_dict(cfg.to_dict())
+    assert restored.unified_timeline.enabled is False
+
+
+def test_session_funnel_enabled_maps_to_unified_timeline_with_warning(caplog):
+    data = {"session_funnel": {"enabled": True, "strategy": "single-agent-main"}}
+    with caplog.at_level(logging.WARNING):
+        cfg = GatewayConfig.from_dict(data)
+    assert cfg.unified_timeline.enabled is True
+    assert any("session_funnel" in rec.message and "deprecated" in rec.message.lower()
+               for rec in caplog.records)

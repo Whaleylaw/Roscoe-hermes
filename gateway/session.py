@@ -556,6 +556,26 @@ def resolve_session_key(
     )
 
 
+def _timeline_rows_to_openai_messages(
+    rows: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """Map unified_timeline rows to the OpenAI conversation shape.
+
+    Shared by :meth:`SessionStore.load_timeline_conversation` and by
+    platform adapters (e.g. ``APIServerAdapter``) that read the timeline
+    directly via :class:`hermes_state.SessionDB`. Centralizing the
+    mapping keeps the role/content contract stable across callers as
+    the timeline evolves.
+    """
+    return [
+        {
+            "role": "assistant" if r["direction"] == "outbound" else "user",
+            "content": r["content"] or "",
+        }
+        for r in rows
+    ]
+
+
 class SessionStore:
     """
     Manages session storage and retrieval.
@@ -1194,7 +1214,19 @@ class SessionStore:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
-        """Load all messages from a session's transcript."""
+        """Load all messages from a session's transcript.
+
+        Returns the *per-session* transcript — the conversation stored
+        under ``session_id``.  Used by mutation / introspection paths
+        (``/retry``, ``/undo``, ``/compress``, ``/branch``, ``/resume``,
+        memory flush, ``/usage``) that need to read or rewrite a
+        specific session's own history.
+
+        Callers that want the agent's *conversational context* for the
+        next turn (which spans every channel the profile is reachable
+        on when the unified timeline is enabled) should instead call
+        :meth:`load_agent_context`.
+        """
         db_messages = []
         # Try SQLite first
         if self._db:
@@ -1240,6 +1272,106 @@ class SessionStore:
             return jsonl_messages
 
         return db_messages
+
+    def load_agent_context(
+        self,
+        source: Optional[SessionSource] = None,
+        session_entry: Optional[SessionEntry] = None,
+    ) -> List[Dict[str, Any]]:
+        """Load the conversational context the agent should see for this turn.
+
+        When the unified timeline is enabled (default), returns the
+        active profile's cross-channel timeline in OpenAI conversation
+        format — the agent has one continuous memory across every
+        channel it is reachable on.  When disabled, falls back to the
+        per-session transcript loaded via :meth:`load_transcript`.
+
+        This is the method callers should use for "what does the agent
+        see next turn?".  Mutation / introspection paths that need to
+        read or rewrite a *specific* session's history should continue
+        to use :meth:`load_transcript` directly.
+
+        ``source`` is accepted for future use (e.g. profile resolution
+        keyed off the source platform); currently the active profile is
+        inferred from ``HERMES_HOME``.  ``session_entry`` supplies the
+        fallback per-session identifier when the timeline is disabled.
+        """
+        if (
+            getattr(self.config, "unified_timeline", None)
+            and self.config.unified_timeline.enabled
+        ):
+            from hermes_cli.profiles import get_active_profile_name
+            return self.load_timeline_conversation(
+                profile_id=get_active_profile_name(),
+            )
+
+        session_id = session_entry.session_id if session_entry else None
+        if not session_id:
+            return []
+        return self.load_transcript(session_id)
+
+    def truncate_timeline_last_exchange(
+        self, profile_id: Optional[str] = None,
+    ) -> int:
+        """Drop the last user message + everything after it from the timeline.
+
+        Mirrors the ``/retry`` / ``/undo`` semantics applied to the
+        per-session transcript: find the most recent inbound row in the
+        profile's unified timeline and delete it together with every
+        row that followed (i.e. the assistant reply, any subsequent
+        turns that occurred on other channels, etc.).
+
+        No-op when the unified timeline is disabled or when there is no
+        inbound row yet.  Returns the number of rows deleted.
+        """
+        if not (
+            getattr(self.config, "unified_timeline", None)
+            and self.config.unified_timeline.enabled
+        ):
+            return 0
+        if not self._db:
+            return 0
+        if profile_id is None:
+            from hermes_cli.profiles import get_active_profile_name
+            profile_id = get_active_profile_name()
+        try:
+            last_seq = self._db.get_last_inbound_seq(profile_id)
+        except Exception as e:
+            logger.warning("Failed to locate last inbound seq for %s: %s",
+                           profile_id, e)
+            return 0
+        if last_seq is None:
+            return 0
+        try:
+            return self._db.truncate_timeline_after(
+                profile_id=profile_id, seq=last_seq, inclusive=True,
+            )
+        except Exception as e:
+            logger.warning("Failed to truncate timeline for %s: %s",
+                           profile_id, e)
+            return 0
+
+    def load_timeline_conversation(
+        self, profile_id: str, limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Load the profile's unified timeline in OpenAI conversation format.
+
+        Returns a list of ``{"role": "user"|"assistant", "content": str}``
+        dicts in chronological order. This is the cross-channel analog of
+        :meth:`load_transcript` and is the source of truth for agent
+        context when the unified timeline is enabled.
+        """
+        if not self._db:
+            return []
+        try:
+            rows = self._db.get_timeline_messages(
+                profile_id=profile_id, limit=limit,
+            )
+        except Exception as e:
+            logger.warning("Failed to load unified timeline for %s: %s",
+                           profile_id, e)
+            return []
+        return _timeline_rows_to_openai_messages(rows)
 
 
 def build_session_context(

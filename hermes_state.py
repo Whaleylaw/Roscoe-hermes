@@ -31,7 +31,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -88,6 +88,24 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS unified_timeline (
+    profile_id         TEXT NOT NULL,
+    seq                INTEGER NOT NULL,
+    ts                 REAL NOT NULL,
+    direction          TEXT NOT NULL,
+    platform           TEXT NOT NULL,
+    source_chat_id     TEXT,
+    source_thread_id   TEXT,
+    author             TEXT,
+    content            TEXT,
+    message_id         TEXT,
+    salience           TEXT NOT NULL DEFAULT 'primary',
+    PRIMARY KEY (profile_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_unified_timeline_lookup
+    ON unified_timeline(profile_id, platform, source_chat_id, source_thread_id, message_id, ts);
 """
 
 FTS_SQL = """
@@ -108,6 +126,25 @@ END;
 CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
     INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS unified_timeline_fts USING fts5(
+    content,
+    content=unified_timeline,
+    content_rowid=rowid
+);
+
+CREATE TRIGGER IF NOT EXISTS unified_timeline_fts_insert AFTER INSERT ON unified_timeline BEGIN
+    INSERT INTO unified_timeline_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS unified_timeline_fts_delete AFTER DELETE ON unified_timeline BEGIN
+    INSERT INTO unified_timeline_fts(unified_timeline_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS unified_timeline_fts_update AFTER UPDATE ON unified_timeline BEGIN
+    INSERT INTO unified_timeline_fts(unified_timeline_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+    INSERT INTO unified_timeline_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
 """
 
@@ -329,6 +366,14 @@ class SessionDB:
                     except sqlite3.OperationalError:
                         pass  # Column already exists
                 cursor.execute("UPDATE schema_version SET version = 6")
+            if current_version < 7:
+                # v7: add unified_timeline table + FTS + lookup index.
+                # CREATE TABLE IF NOT EXISTS is idempotent, so executing
+                # SCHEMA_SQL again at this point is safe — and the simplest
+                # way to guarantee the new table exists on upgrade paths.
+                cursor.executescript(SCHEMA_SQL)
+                cursor.executescript(FTS_SQL)
+                cursor.execute("UPDATE schema_version SET version = 7")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -985,6 +1030,128 @@ class SessionDB:
             return msg_id
 
         return self._execute_write(_do)
+
+    # =========================================================================
+    # Unified timeline storage (profile-scoped, cross-channel)
+    # =========================================================================
+
+    def timeline_next_seq(self, profile_id: str) -> int:
+        """Return the next monotonic seq value for a profile's timeline."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM unified_timeline "
+                "WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+        return int(row[0])
+
+    def append_timeline_message(
+        self,
+        profile_id: str,
+        direction: str,
+        platform: str,
+        source_chat_id: Optional[str],
+        source_thread_id: Optional[str],
+        author: Optional[str],
+        content: Optional[str],
+        message_id: Optional[str],
+        ts: float,
+        salience: str = "primary",
+    ) -> int:
+        """Append one row to unified_timeline. Returns the assigned seq."""
+        def _do(conn):
+            row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM unified_timeline "
+                "WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+            seq = int(row[0])
+            conn.execute(
+                "INSERT INTO unified_timeline (profile_id, seq, ts, direction, "
+                "platform, source_chat_id, source_thread_id, author, content, "
+                "message_id, salience) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (profile_id, seq, ts, direction, platform, source_chat_id,
+                 source_thread_id, author, content, message_id, salience),
+            )
+            return seq
+        return self._execute_write(_do)
+
+    def get_last_inbound_seq(self, profile_id: str) -> Optional[int]:
+        """Return the seq of the most recent inbound row for a profile.
+
+        Returns ``None`` when the profile's timeline has no inbound rows
+        yet.  Used by mutation commands (``/retry``, ``/undo``) that
+        need to truncate the timeline back to before the last user
+        message.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(seq) FROM unified_timeline "
+                "WHERE profile_id = ? AND direction = 'inbound' "
+                "AND salience = 'primary'",
+                (profile_id,),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+
+    def truncate_timeline_after(
+        self, profile_id: str, seq: int, *, inclusive: bool = True,
+    ) -> int:
+        """Delete timeline rows at or after ``seq`` for ``profile_id``.
+
+        When ``inclusive=True`` (default), rows with ``seq >= seq`` are
+        removed — used by ``/retry`` / ``/undo`` to drop the last user
+        message and everything after it from the cross-channel log.
+        When ``inclusive=False``, only rows with ``seq > seq`` are
+        removed (useful when the caller wants to keep the row at
+        ``seq`` itself, e.g. truncating assistant replies to a retained
+        user turn).
+
+        Returns the number of rows deleted.
+        """
+        op = ">=" if inclusive else ">"
+        def _do(conn):
+            cursor = conn.execute(
+                f"DELETE FROM unified_timeline "
+                f"WHERE profile_id = ? AND seq {op} ?",
+                (profile_id, seq),
+            )
+            return cursor.rowcount
+        return self._execute_write(_do)
+
+    def get_timeline_messages(
+        self,
+        profile_id: str,
+        limit: Optional[int] = None,
+        salience: str = "primary",
+    ) -> List[Dict[str, Any]]:
+        """Load timeline messages for a profile, ordered by seq ascending.
+
+        When ``limit`` is given, returns the most recent N messages, still
+        ordered seq-ascending (oldest of the N first).
+        """
+        with self._lock:
+            if limit is None:
+                cursor = self._conn.execute(
+                    "SELECT profile_id, seq, ts, direction, platform, "
+                    "source_chat_id, source_thread_id, author, content, "
+                    "message_id, salience FROM unified_timeline "
+                    "WHERE profile_id = ? AND salience = ? ORDER BY seq ASC",
+                    (profile_id, salience),
+                )
+                rows = cursor.fetchall()
+            else:
+                cursor = self._conn.execute(
+                    "SELECT * FROM (SELECT profile_id, seq, ts, direction, "
+                    "platform, source_chat_id, source_thread_id, author, "
+                    "content, message_id, salience FROM unified_timeline "
+                    "WHERE profile_id = ? AND salience = ? "
+                    "ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC",
+                    (profile_id, salience, limit),
+                )
+                rows = cursor.fetchall()
+        return [dict(r) for r in rows]
 
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages for a session, ordered by timestamp."""

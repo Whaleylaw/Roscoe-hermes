@@ -203,15 +203,29 @@ class TestAuth:
 # ---------------------------------------------------------------------------
 
 
-def _make_adapter(api_key: str = "", cors_origins=None) -> APIServerAdapter:
-    """Create an adapter with optional API key."""
+def _make_adapter(
+    api_key: str = "",
+    cors_origins=None,
+    unified_timeline_enabled: bool = False,
+) -> APIServerAdapter:
+    """Create an adapter with optional API key.
+
+    By default the unified timeline is *disabled* in these unit tests so
+    the legacy behaviors (request-body conversation_history, X-Hermes-
+    Session-Id continuation) remain exercised. Tests that target the
+    unified-timeline wiring pass ``unified_timeline_enabled=True``.
+    """
     extra = {}
     if api_key:
         extra["key"] = api_key
     if cors_origins is not None:
         extra["cors_origins"] = cors_origins
     config = PlatformConfig(enabled=True, extra=extra)
-    return APIServerAdapter(config)
+    adapter = APIServerAdapter(config)
+    gw_cfg = GatewayConfig()
+    gw_cfg.unified_timeline.enabled = unified_timeline_enabled
+    adapter.set_gateway_config(gw_cfg)
+    return adapter
 
 
 def _create_app(adapter: APIServerAdapter) -> web.Application:
@@ -2091,3 +2105,353 @@ class TestSessionIdHeader:
             call_kwargs = mock_run.call_args.kwargs
             assert call_kwargs["conversation_history"] == []
             assert call_kwargs["session_id"] == "some-session"
+
+
+# ---------------------------------------------------------------------------
+# Unified Timeline wiring (T7)
+# ---------------------------------------------------------------------------
+
+
+class TestUnifiedTimelineWiring:
+    """The api_server must route memory through the unified timeline so
+    Open WebUI shares continuity with Telegram/Discord/etc. — regardless
+    of the client's X-Hermes-Session-Id header."""
+
+    def _make_ut_adapter(self, tmp_path, monkeypatch, api_key: str = ""):
+        """Build an adapter that uses a per-test SessionDB + unified timeline."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        # Make sure the SessionDB singleton uses the isolated path.
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        adapter = _make_adapter(api_key=api_key, unified_timeline_enabled=True)
+        adapter._session_db = db
+        return adapter, db
+
+    def test_api_server_records_through_unified_timeline_seed(
+        self, tmp_path, monkeypatch,
+    ):
+        """Pre-seeded timeline scaffolding — two rows from a Telegram turn."""
+        from gateway.unified_timeline import UnifiedTimeline
+        from gateway.session import SessionSource
+        from hermes_state import SessionDB
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            ut = UnifiedTimeline(db=db, profile_id="default")
+            h = ut.record_inbound(
+                source=SessionSource(
+                    platform=Platform.TELEGRAM, chat_id="tg1",
+                    chat_type="dm", user_id="u1", user_name="alice",
+                ),
+                content="remember: my pet's name is Fig",
+                message_id="tg-m1",
+            )
+            ut.record_outbound(turn=h, content="noted — Fig")
+            rows_before = db.get_timeline_messages(profile_id="default")
+            assert len(rows_before) == 2
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_post_writes_to_unified_timeline(
+        self, tmp_path, monkeypatch,
+    ):
+        """A POST to /v1/chat/completions appends inbound+outbound rows to
+        the profile's unified_timeline — regardless of X-Hermes-Session-Id."""
+        from gateway.unified_timeline import UnifiedTimeline
+        from gateway.session import SessionSource
+
+        adapter, db = self._make_ut_adapter(tmp_path, monkeypatch)
+        # Force the UnifiedTimeline service to resolve to our isolated
+        # profile so different test orders don't collide.
+        monkeypatch.setattr(
+            "gateway.unified_timeline.get_active_profile_name",
+            lambda: "default",
+        )
+        # Also patch the active-profile accessor imported at module load
+        # time (from hermes_cli.profiles into gateway.unified_timeline).
+        try:
+            # Seed a prior Telegram turn so we can prove continuity.
+            ut = UnifiedTimeline(db=db, profile_id="default")
+            h = ut.record_inbound(
+                source=SessionSource(
+                    platform=Platform.TELEGRAM, chat_id="tg1",
+                    chat_type="dm", user_id="u1", user_name="alice",
+                ),
+                content="remember: my pet's name is Fig",
+                message_id="tg-m1",
+            )
+            ut.record_outbound(turn=h, content="noted — Fig")
+
+            rows_before = db.get_timeline_messages(profile_id="default")
+            assert len(rows_before) == 2
+
+            mock_result = {
+                "final_response": "Your pet is Fig.",
+                "messages": [], "api_calls": 1,
+            }
+            app = _create_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                    mock_run.return_value = (
+                        mock_result,
+                        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    )
+                    resp = await cli.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": "hermes-agent",
+                            "messages": [
+                                {"role": "user", "content": "what's my pet's name?"},
+                            ],
+                        },
+                    )
+                    assert resp.status == 200
+
+                    call_kwargs = mock_run.call_args.kwargs
+                    # Agent should see the seeded Telegram turn as history
+                    # (profile-wide timeline, not the POST body).
+                    history = call_kwargs["conversation_history"]
+                    assert any("Fig" in (m.get("content") or "") for m in history), (
+                        "Unified timeline did not supply prior Telegram turn"
+                    )
+
+            rows_after = db.get_timeline_messages(profile_id="default")
+            assert len(rows_after) == len(rows_before) + 2, (
+                f"expected +2 rows (inbound + outbound), got "
+                f"{len(rows_after) - len(rows_before)}"
+            )
+            # Confirm the new rows are tagged with the api_server platform.
+            new_rows = rows_after[-2:]
+            assert new_rows[0]["direction"] == "inbound"
+            assert new_rows[0]["platform"] == Platform.API_SERVER.value
+            assert new_rows[0]["content"] == "what's my pet's name?"
+            assert new_rows[1]["direction"] == "outbound"
+            assert new_rows[1]["platform"] == Platform.API_SERVER.value
+            assert new_rows[1]["content"] == "Your pet is Fig."
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_streaming_chat_completion_records_outbound(
+        self, tmp_path, monkeypatch,
+    ):
+        """Streaming /v1/chat/completions must still write outbound row."""
+        adapter, db = self._make_ut_adapter(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "gateway.unified_timeline.get_active_profile_name",
+            lambda: "default",
+        )
+        try:
+            rows_before = db.get_timeline_messages(profile_id="default")
+            assert rows_before == []
+
+            async def _mock_run_agent(**kwargs):
+                cb = kwargs.get("stream_delta_callback")
+                if cb:
+                    cb("Hello")
+                    cb(" streaming")
+                    cb(None)
+                return (
+                    {"final_response": "Hello streaming", "messages": [], "api_calls": 1},
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+
+            app = _create_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                    resp = await cli.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": "hermes-agent",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "stream": True,
+                        },
+                    )
+                    assert resp.status == 200
+                    # Drain the SSE body so the writer reaches finalize.
+                    body = await resp.text()
+                    assert "[DONE]" in body
+
+            rows_after = db.get_timeline_messages(profile_id="default")
+            assert len(rows_after) == 2
+            assert rows_after[0]["direction"] == "inbound"
+            assert rows_after[0]["content"] == "hi"
+            assert rows_after[1]["direction"] == "outbound"
+            assert rows_after[1]["content"] == "Hello streaming"
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_responses_endpoint_records_through_unified_timeline(
+        self, tmp_path, monkeypatch,
+    ):
+        """POST /v1/responses also writes to the unified timeline."""
+        adapter, db = self._make_ut_adapter(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "gateway.unified_timeline.get_active_profile_name",
+            lambda: "default",
+        )
+        try:
+            mock_result = {
+                "final_response": "pong",
+                "messages": [], "api_calls": 1,
+            }
+            app = _create_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                    mock_run.return_value = (
+                        mock_result,
+                        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    )
+                    resp = await cli.post(
+                        "/v1/responses",
+                        json={
+                            "model": "hermes-agent",
+                            "input": "ping",
+                        },
+                    )
+                    assert resp.status == 200
+
+            rows = db.get_timeline_messages(profile_id="default")
+            assert len(rows) == 2
+            assert rows[0]["direction"] == "inbound"
+            assert rows[0]["platform"] == Platform.API_SERVER.value
+            assert rows[0]["content"] == "ping"
+            assert rows[1]["direction"] == "outbound"
+            assert rows[1]["platform"] == Platform.API_SERVER.value
+            assert rows[1]["content"] == "pong"
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_header_session_id_does_not_partition_timeline(
+        self, tmp_path, monkeypatch,
+    ):
+        """Two POSTs with *different* X-Hermes-Session-Id headers still
+        append to the same profile timeline — the header is advisory.
+        """
+        adapter, db = self._make_ut_adapter(
+            tmp_path, monkeypatch, api_key="sk-test",
+        )
+        monkeypatch.setattr(
+            "gateway.unified_timeline.get_active_profile_name",
+            lambda: "default",
+        )
+        try:
+            mock_result = {
+                "final_response": "reply", "messages": [], "api_calls": 1,
+            }
+            app = _create_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                    mock_run.return_value = (
+                        mock_result,
+                        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    )
+                    for header_sid in ("client-A", "client-B"):
+                        resp = await cli.post(
+                            "/v1/chat/completions",
+                            headers={
+                                "X-Hermes-Session-Id": header_sid,
+                                "Authorization": "Bearer sk-test",
+                            },
+                            json={
+                                "model": "hermes-agent",
+                                "messages": [
+                                    {"role": "user", "content": f"msg from {header_sid}"},
+                                ],
+                            },
+                        )
+                        assert resp.status == 200
+
+            rows = db.get_timeline_messages(profile_id="default")
+            # 2 requests × (inbound+outbound) = 4 rows, all in the same profile.
+            assert len(rows) == 4
+            assert rows[0]["content"] == "msg from client-A"
+            assert rows[2]["content"] == "msg from client-B"
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_error_path_records_outbound(
+        self, tmp_path, monkeypatch,
+    ):
+        """When _compute_completion raises, the inbound turn must still
+        be closed on the unified timeline with the error string that
+        shipped to the client — otherwise the inbound is orphaned and
+        the next cross-channel turn reads a stuck "user waiting" state.
+        """
+        adapter, db = self._make_ut_adapter(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "gateway.unified_timeline.get_active_profile_name",
+            lambda: "default",
+        )
+        try:
+            async def _boom(**kwargs):
+                raise RuntimeError("provider exploded")
+
+            app = _create_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_run_agent", side_effect=_boom):
+                    resp = await cli.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": "hermes-agent",
+                            "messages": [{"role": "user", "content": "ping"}],
+                        },
+                    )
+                    assert resp.status == 500
+
+            rows = db.get_timeline_messages(profile_id="default")
+            # Inbound + error outbound — the inbound isn't orphaned.
+            assert len(rows) == 2, (
+                f"expected inbound + error outbound, got {len(rows)} rows"
+            )
+            assert rows[0]["direction"] == "inbound"
+            assert rows[0]["content"] == "ping"
+            assert rows[1]["direction"] == "outbound"
+            # Error string contains the sentinel from _openai_error.
+            assert "Internal server error" in (rows[1]["content"] or "")
+            assert "provider exploded" in (rows[1]["content"] or "")
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_responses_endpoint_error_path_records_outbound(
+        self, tmp_path, monkeypatch,
+    ):
+        """Same guarantee for /v1/responses: an exception from the
+        agent must not leave a dangling inbound row.
+        """
+        adapter, db = self._make_ut_adapter(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "gateway.unified_timeline.get_active_profile_name",
+            lambda: "default",
+        )
+        try:
+            async def _boom(**kwargs):
+                raise RuntimeError("responses blew up")
+
+            app = _create_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_run_agent", side_effect=_boom):
+                    resp = await cli.post(
+                        "/v1/responses",
+                        json={
+                            "model": "hermes-agent",
+                            "input": "hello",
+                        },
+                    )
+                    assert resp.status == 500
+
+            rows = db.get_timeline_messages(profile_id="default")
+            assert len(rows) == 2
+            assert rows[0]["direction"] == "inbound"
+            assert rows[0]["content"] == "hello"
+            assert rows[1]["direction"] == "outbound"
+            assert "Internal server error" in (rows[1]["content"] or "")
+            assert "responses blew up" in (rows[1]["content"] or "")
+        finally:
+            db.close()

@@ -46,6 +46,8 @@ from gateway.platforms.base import (
     SendResult,
     is_network_accessible,
 )
+from gateway.session import SessionSource, _timeline_rows_to_openai_messages
+from gateway.unified_timeline import TurnHandle, UnifiedTimeline
 
 logger = logging.getLogger(__name__)
 
@@ -549,6 +551,11 @@ class APIServerAdapter(BasePlatformAdapter):
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        # Lazy-loaded GatewayConfig for consulting feature flags
+        # (e.g. ``unified_timeline.enabled``).  The adapter is constructed
+        # with only a PlatformConfig, so we fetch the full GatewayConfig on
+        # demand.  Can be overridden by tests via ``set_gateway_config``.
+        self._gateway_config: Optional[Any] = None
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -658,6 +665,132 @@ class APIServerAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.debug("SessionDB unavailable for API server: %s", e)
         return self._session_db
+
+    def set_gateway_config(self, config: Any) -> None:
+        """Inject the gateway-level config (used by the runner and tests)."""
+        self._gateway_config = config
+
+    def _ensure_gateway_config(self) -> Optional[Any]:
+        """Lazily load the gateway-level config (for feature-flag checks).
+
+        The adapter is constructed with a ``PlatformConfig``; feature flags
+        like ``unified_timeline.enabled`` live on the top-level
+        ``GatewayConfig``. We load it on first use and cache the result.
+        """
+        if self._gateway_config is None:
+            try:
+                from gateway.config import load_gateway_config
+                self._gateway_config = load_gateway_config()
+            except Exception as e:
+                logger.debug("GatewayConfig unavailable for API server: %s", e)
+        return self._gateway_config
+
+    def _unified_timeline_enabled(self) -> bool:
+        """Return True when the unified-timeline rollout is enabled."""
+        cfg = self._ensure_gateway_config()
+        ut_cfg = getattr(cfg, "unified_timeline", None) if cfg is not None else None
+        return bool(ut_cfg and getattr(ut_cfg, "enabled", False))
+
+    def _load_unified_timeline_history(self) -> List[Dict[str, str]]:
+        """Load the active profile's unified timeline in OpenAI message format.
+
+        Returns ``[]`` on any failure. The unified timeline is the single
+        source of truth for cross-channel context — every Open WebUI POST
+        (regardless of its client-side ``X-Hermes-Session-Id``) reads
+        continuity from this profile-wide log.
+        """
+        db = self._ensure_session_db()
+        if db is None:
+            return []
+        try:
+            ut = UnifiedTimeline.for_active_profile(db=db)
+            rows = db.get_timeline_messages(profile_id=ut.profile_id)
+        except Exception as e:
+            logger.warning("Failed to load unified timeline history: %s", e)
+            return []
+        return _timeline_rows_to_openai_messages(rows)
+
+    def _record_inbound_timeline(
+        self, *, session_id: str, user_message: Any, request: "web.Request",
+    ) -> Optional[TurnHandle]:
+        """Record an inbound turn on the unified timeline.
+
+        Returns a ``TurnHandle`` so the caller can close the loop with
+        :meth:`_record_outbound_timeline`. Returns ``None`` when the feature
+        is disabled or SessionDB is unavailable — the caller should treat a
+        ``None`` handle as "don't record the outbound side either".
+        """
+        if not self._unified_timeline_enabled():
+            return None
+        db = self._ensure_session_db()
+        if db is None:
+            return None
+        # Reduce the user message to plain text for the timeline. Multimodal
+        # parts are flattened via the existing normalizer so the row has
+        # something readable; the agent still sees the full content.
+        try:
+            content = _normalize_chat_content(user_message)
+        except Exception:
+            content = str(user_message) if user_message is not None else ""
+        try:
+            source = SessionSource(
+                platform=Platform.API_SERVER,
+                chat_id=session_id or "openai-default",
+                chat_type="dm",
+                user_id=request.headers.get("X-User-Id"),
+                user_name=None,
+            )
+            ut = UnifiedTimeline.for_active_profile(db=db)
+            return ut.record_inbound(
+                source=source,
+                content=content,
+                message_id=None,
+            )
+        except Exception as e:
+            logger.warning("unified_timeline record_inbound failed: %s", e)
+            return None
+
+    def _record_outbound_timeline(
+        self, *, turn_handle: Optional[TurnHandle], content: str,
+    ) -> None:
+        """Record an outbound reply tied to an earlier inbound turn."""
+        if turn_handle is None or not content:
+            return
+        db = self._ensure_session_db()
+        if db is None:
+            return
+        try:
+            ut = UnifiedTimeline.for_active_profile(db=db)
+            ut.record_outbound(turn=turn_handle, content=content)
+        except Exception as e:
+            logger.warning("unified_timeline record_outbound failed: %s", e)
+
+    def _record_error_outbound_timeline(
+        self, *, turn_handle: Optional[TurnHandle], err_message: str,
+    ) -> None:
+        """Record an error-path outbound so the inbound turn isn't orphaned.
+
+        When ``_compute_completion`` / ``_compute_response`` raises
+        after the inbound row has already been written, skipping the
+        outbound record leaves the timeline with an unanswered user
+        turn.  The next cross-channel context read would then show the
+        agent in a "user is waiting for a reply" state that no longer
+        reflects reality — closing the turn with the error string that
+        actually shipped to the client keeps the timeline honest.
+
+        Mirrors ``GatewayRunner._record_error_outbound`` in
+        ``gateway/run.py``; best-effort, never raises.
+        """
+        if turn_handle is None or not err_message:
+            return
+        try:
+            self._record_outbound_timeline(
+                turn_handle=turn_handle, content=err_message,
+            )
+        except Exception as e:
+            logger.warning(
+                "unified_timeline record_outbound (error path) failed: %s", e,
+            )
 
     # ------------------------------------------------------------------
     # Agent creation helper
@@ -822,14 +955,15 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=400,
             )
 
-        # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
-        # When provided, history is loaded from state.db instead of from the request body.
-        #
-        # Security: session continuation exposes conversation history, so it is
-        # only allowed when the API key is configured and the request is
-        # authenticated.  Without this gate, any unauthenticated client could
-        # read arbitrary session history by guessing/enumerating session IDs.
+        # X-Hermes-Session-Id is advisory as of the unified-timeline rollout —
+        # the agent's memory comes from the profile's unified timeline, not
+        # from any client-supplied session id. See
+        # docs/superpowers/specs/2026-04-21-unified-timeline-design.md.
+        # The header is still read for client-side response correlation and
+        # for the legacy (unified_timeline disabled) continuation path.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
+        unified_enabled = self._unified_timeline_enabled()
+
         if provided_session_id:
             if not self._api_key:
                 logger.warning(
@@ -851,13 +985,16 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=400,
                 )
             session_id = provided_session_id
-            try:
-                db = self._ensure_session_db()
-                if db is not None:
-                    history = db.get_messages_as_conversation(session_id)
-            except Exception as e:
-                logger.warning("Failed to load session history for %s: %s", session_id, e)
-                history = []
+            if unified_enabled:
+                history = self._load_unified_timeline_history()
+            else:
+                try:
+                    db = self._ensure_session_db()
+                    if db is not None:
+                        history = db.get_messages_as_conversation(session_id)
+                except Exception as e:
+                    logger.warning("Failed to load session history for %s: %s", session_id, e)
+                    history = []
         else:
             # Derive a stable session ID from the conversation fingerprint so
             # that consecutive messages from the same Open WebUI (or similar)
@@ -869,7 +1006,21 @@ class APIServerAdapter(BasePlatformAdapter):
                     first_user = cm.get("content", "")
                     break
             session_id = _derive_chat_session_id(system_prompt, first_user)
-            # history already set from request body above
+            if unified_enabled:
+                # Unified timeline is the single source of truth for
+                # cross-channel continuity — the request body's own
+                # conversation history is discarded in favor of the
+                # profile-wide log that Telegram, Discord, etc. share.
+                history = self._load_unified_timeline_history()
+            # else: history already set from request body above
+
+        # Record the inbound turn on the unified timeline (if enabled) so
+        # the agent's reply can be appended when it arrives.
+        turn_handle = self._record_inbound_timeline(
+            session_id=session_id,
+            user_message=user_message,
+            request=request,
+        )
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
@@ -934,9 +1085,15 @@ class APIServerAdapter(BasePlatformAdapter):
                 agent_ref=agent_ref,
             ))
 
+            def _finalize_outbound(full_text: str) -> None:
+                self._record_outbound_timeline(
+                    turn_handle=turn_handle, content=full_text,
+                )
+
             return await self._write_sse_chat_completion(
                 request, completion_id, model_name, created, _stream_q,
                 agent_task, agent_ref, session_id=session_id,
+                finalize_cb=_finalize_outbound,
             )
 
         # Non-streaming: run the agent (with optional Idempotency-Key)
@@ -955,8 +1112,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_completion)
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
+                err_message = f"Internal server error: {e}"
+                # Close the loop on the unified timeline so the
+                # already-recorded inbound row isn't orphaned.
+                self._record_error_outbound_timeline(
+                    turn_handle=turn_handle, err_message=err_message,
+                )
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    _openai_error(err_message, err_type="server_error"),
                     status=500,
                 )
         else:
@@ -964,8 +1127,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _compute_completion()
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
+                err_message = f"Internal server error: {e}"
+                self._record_error_outbound_timeline(
+                    turn_handle=turn_handle, err_message=err_message,
+                )
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    _openai_error(err_message, err_type="server_error"),
                     status=500,
                 )
 
@@ -995,11 +1162,17 @@ class APIServerAdapter(BasePlatformAdapter):
             },
         }
 
+        # Record the agent's reply on the unified timeline before returning.
+        self._record_outbound_timeline(
+            turn_handle=turn_handle, content=final_response or "",
+        )
+
         return web.json_response(response_data, headers={"X-Hermes-Session-Id": session_id})
 
     async def _write_sse_chat_completion(
         self, request: "web.Request", completion_id: str, model: str,
         created: int, stream_q, agent_task, agent_ref=None, session_id: str = None,
+        finalize_cb=None,
     ) -> "web.StreamResponse":
         """Write real streaming SSE from agent's stream_delta_callback queue.
 
@@ -1037,6 +1210,10 @@ class APIServerAdapter(BasePlatformAdapter):
             await response.write(f"data: {json.dumps(role_chunk)}\n\n".encode())
             last_activity = time.monotonic()
 
+            # Accumulate streamed text so finalize_cb can record the full
+            # assistant reply on the unified timeline once the stream is done.
+            accumulated_text: List[str] = []
+
             # Helper — route a queue item to the correct SSE event.
             async def _emit(item):
                 """Write a single queue item to the SSE stream.
@@ -1053,6 +1230,8 @@ class APIServerAdapter(BasePlatformAdapter):
                         f"event: hermes.tool.progress\ndata: {event_data}\n\n".encode()
                     )
                 else:
+                    if isinstance(item, str):
+                        accumulated_text.append(item)
                     content_chunk = {
                         "id": completion_id, "object": "chat.completion.chunk",
                         "created": created, "model": model,
@@ -1090,9 +1269,12 @@ class APIServerAdapter(BasePlatformAdapter):
 
             # Get usage from completed agent
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            agent_final_text = ""
             try:
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
+                if isinstance(result, dict):
+                    agent_final_text = result.get("final_response", "") or ""
             except Exception:
                 pass
 
@@ -1109,6 +1291,25 @@ class APIServerAdapter(BasePlatformAdapter):
             }
             await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
             await response.write(b"data: [DONE]\n\n")
+
+            # Record the full assistant reply on the unified timeline.
+            # Prefer accumulated stream deltas; fall back to the agent's
+            # final_response for providers that only emit the full reply at
+            # the end (or when streaming was suppressed by a tool-only turn).
+            #
+            # finalize_cb fires only on the happy path. If the client
+            # disconnects mid-stream the except-block below takes over and
+            # the outbound record is intentionally skipped — recording a
+            # partial reply as "what the agent said" would mislead the next
+            # turn's context load. The inbound row is already persisted so
+            # the user's message isn't lost; the agent just never claims
+            # credit for an interrupted response.
+            if finalize_cb is not None:
+                full_text = "".join(accumulated_text) or agent_final_text
+                try:
+                    finalize_cb(full_text)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("finalize_cb failed for chat completion: %s", e)
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
             # Client disconnected mid-stream.  Interrupt the agent so it
             # stops making LLM API calls at the next loop iteration, then
@@ -1144,6 +1345,7 @@ class APIServerAdapter(BasePlatformAdapter):
         conversation: Optional[str],
         store: bool,
         session_id: str,
+        finalize_cb=None,
     ) -> "web.StreamResponse":
         """Write an SSE stream for POST /v1/responses (OpenAI Responses API).
 
@@ -1513,6 +1715,23 @@ class APIServerAdapter(BasePlatformAdapter):
                     "response": completed_env,
                 })
 
+                # Record the assistant reply on the unified timeline.
+                #
+                # finalize_cb fires only on the happy path (response.completed
+                # emitted cleanly). If the client disconnects mid-stream the
+                # except-block below takes over and the outbound record is
+                # intentionally skipped — recording a partial reply as "what
+                # the agent said" would mislead the next turn's context load.
+                # The inbound row is already persisted so the user's message
+                # isn't lost; the agent just never claims credit for an
+                # interrupted response.  Failure envelopes (response.failed)
+                # also skip finalize_cb on purpose — same reasoning.
+                if finalize_cb is not None:
+                    try:
+                        finalize_cb(final_response_text or "")
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("finalize_cb failed for responses: %s", e)
+
                 # Persist for future chaining / GET retrieval, mirroring
                 # the batch path behavior.
                 if store:
@@ -1655,6 +1874,23 @@ class APIServerAdapter(BasePlatformAdapter):
         # groups the entire conversation under one session entry.
         session_id = stored_session_id or str(uuid.uuid4())
 
+        # Unified timeline (if enabled) is the single source of truth for
+        # cross-channel continuity — it supersedes client-provided
+        # conversation_history and previous_response_id chaining.  The
+        # response_store still persists per-response data for the
+        # GET /v1/responses/{id} path.
+        unified_enabled = self._unified_timeline_enabled()
+        if unified_enabled:
+            conversation_history = self._load_unified_timeline_history()
+
+        # Record the inbound turn on the unified timeline so the agent's
+        # reply can be appended when it arrives.
+        turn_handle = self._record_inbound_timeline(
+            session_id=session_id,
+            user_message=user_message,
+            request=request,
+        )
+
         stream = bool(body.get("stream", False))
         if stream:
             # Streaming branch — emit OpenAI Responses SSE events as the
@@ -1713,6 +1949,11 @@ class APIServerAdapter(BasePlatformAdapter):
             model_name = body.get("model", self._model_name)
             created_at = int(time.time())
 
+            def _finalize_outbound(full_text: str) -> None:
+                self._record_outbound_timeline(
+                    turn_handle=turn_handle, content=full_text,
+                )
+
             return await self._write_sse_responses(
                 request=request,
                 response_id=response_id,
@@ -1727,6 +1968,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 conversation=conversation,
                 store=store,
                 session_id=session_id,
+                finalize_cb=_finalize_outbound,
             )
 
         async def _compute_response():
@@ -1747,8 +1989,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_response)
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
+                err_message = f"Internal server error: {e}"
+                self._record_error_outbound_timeline(
+                    turn_handle=turn_handle, err_message=err_message,
+                )
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    _openai_error(err_message, err_type="server_error"),
                     status=500,
                 )
         else:
@@ -1756,8 +2002,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _compute_response()
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
+                err_message = f"Internal server error: {e}"
+                self._record_error_outbound_timeline(
+                    turn_handle=turn_handle, err_message=err_message,
+                )
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    _openai_error(err_message, err_type="server_error"),
                     status=500,
                 )
 
@@ -1808,6 +2058,11 @@ class APIServerAdapter(BasePlatformAdapter):
             # conversation name automatically chains to this response
             if conversation:
                 self._response_store.set_conversation(conversation, response_id)
+
+        # Record the agent's reply on the unified timeline before returning.
+        self._record_outbound_timeline(
+            turn_handle=turn_handle, content=final_response or "",
+        )
 
         return web.json_response(response_data)
 

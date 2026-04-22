@@ -311,3 +311,69 @@ grep -r "telegram\|discord\|whatsapp\|slack" gateway/ tools/ agent/ cron/ hermes
   --include="*.py" -l | sort -u
 # Check each file in the output — if it mentions other platforms but not yours, you missed it
 ```
+
+---
+
+## Unified Timeline
+
+Your agent has one conversation timeline per profile across every channel —
+so a DM on Telegram continues seamlessly when the user switches to Open
+WebUI or Discord. As a new adapter author, you get this for free if you
+follow the standard runner pipeline.
+
+### Runner-backed adapters (Telegram, Discord, Slack, iMessage, WhatsApp, …)
+
+If your adapter plugs into `gateway/run.py` the normal way — building a
+`SessionSource` from the platform event, constructing a `MessageEvent`,
+and calling `self._message_handler(event)` — unified-timeline recording
+is handled for you by `GatewayRunner._handle_message_with_agent`.
+Inbound messages are recorded right after the session is bound and the
+text is prepared; outbound is recorded after the agent's response is
+finalized. No per-adapter code needed.
+
+Do not:
+
+- Write the agent transcript into a per-channel session as your source of
+  truth. The `sessions` table still exists for routing metadata (origin,
+  delivery destination, reset policy, token counters), but it is no
+  longer the source of truth for agent memory.
+- Trust client-supplied session ids. They are advisory only. The agent's
+  memory is scoped by profile, not by caller.
+
+### Adapters with their own endpoint handler (api_server, …)
+
+If your adapter bypasses `_handle_message_with_agent` — for example,
+because it exposes an HTTP endpoint like the OpenAI-compatible
+`/v1/chat/completions` — you are responsible for calling
+`UnifiedTimeline` yourself. See `gateway/platforms/api_server.py` for the
+reference implementation. The pattern:
+
+```python
+from gateway.unified_timeline import UnifiedTimeline
+from gateway.session import SessionSource
+
+# Inbound, after building a SessionSource for the request:
+ut = UnifiedTimeline.for_active_profile(db=self._ensure_session_db())
+turn_handle = ut.record_inbound(
+    source=source,
+    content=user_message_text,
+    message_id=platform_message_id,
+)
+
+# Outbound, after the agent's reply is finalized:
+if turn_handle is not None and reply_text:
+    ut.record_outbound(turn=turn_handle, content=reply_text)
+```
+
+Streaming responses should accumulate the full text and call
+`record_outbound` once with the completed content — not once per delta.
+
+### Reference implementations
+
+- Runner-backed: `gateway/run.py._handle_message_with_agent` (Telegram, Discord, etc.).
+- Endpoint-handler: `gateway/platforms/api_server.py` (Open WebUI, LobeChat, LibreChat).
+
+### Spec and design
+
+- `docs/superpowers/specs/2026-04-21-unified-timeline-design.md`
+- `docs/superpowers/plans/2026-04-21-unified-timeline.md`
