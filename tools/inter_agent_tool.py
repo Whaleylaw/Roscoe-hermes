@@ -105,3 +105,59 @@ def _resolve_agent(agent_id: str) -> Optional[Dict[str, Any]]:
         if entry.get("id") == agent_id:
             return entry
     return None
+
+
+# ---------------------------------------------------------------------------
+# HTTP helper
+# ---------------------------------------------------------------------------
+
+def _rpc_post(base_url: str, method: str, params: Dict[str, Any],
+              timeout: Optional[int] = None) -> tuple[Optional[dict], Optional[str]]:
+    """POST a JSON-RPC 2.0 request to an a2a-bridge endpoint.
+
+    Returns (result, None) on success or (None, error_message) on failure.
+    Handles network errors, 401s, malformed bodies, and JSON-RPC error objects.
+    """
+    token = _get_token()
+    if not token:
+        return None, "HERMES_TOKEN not set"
+
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4()),
+        "method": method,
+        "params": params,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        base_url.rstrip("/") + "/",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout or _get_timeout()) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return None, "Auth rejected by bridge. Check HERMES_TOKEN matches bridge config."
+        return None, f"Bridge HTTP {exc.code}: {exc.reason}"
+    except urllib.error.URLError as exc:
+        return None, f"Bridge not reachable at {base_url}: {exc.reason}"
+    except TimeoutError as exc:
+        return None, f"Bridge timeout at {base_url}: {exc}"
+
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        preview = body[:200].decode("utf-8", errors="replace")
+        return None, f"Bridge returned malformed response: {preview}"
+
+    if "error" in data and data["error"]:
+        err = data["error"]
+        return None, f"JSON-RPC {err.get('code')}: {err.get('message')}"
+
+    return data.get("result"), None

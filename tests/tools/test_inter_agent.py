@@ -1,9 +1,7 @@
 """Tests for the inter-agent toolset."""
 
 import json
-import os
-import tempfile
-from pathlib import Path
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -124,3 +122,76 @@ class TestResolveAgent:
         monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
         from tools.inter_agent_tool import _resolve_agent
         assert _resolve_agent("nope") is None
+
+
+# ---------------------------------------------------------------------------
+# _rpc_post
+# ---------------------------------------------------------------------------
+
+def _mock_urlopen(body_json, status=200):
+    mock = MagicMock()
+    mock.status = status
+    mock.read.return_value = json.dumps(body_json).encode("utf-8")
+    mock.__enter__ = MagicMock(return_value=mock)
+    mock.__exit__ = MagicMock(return_value=False)
+    return mock
+
+
+class TestRpcPost:
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_success_returns_result(self, mock_fn, monkeypatch):
+        monkeypatch.setenv("HERMES_TOKEN", "secret-token")
+        mock_fn.return_value = _mock_urlopen(
+            {"jsonrpc": "2.0", "id": "req-1", "result": {"ok": True}}
+        )
+        from tools.inter_agent_tool import _rpc_post
+        result, err = _rpc_post("http://127.0.0.1:18801", "tasks/get", {"id": "t"})
+        assert err is None
+        assert result == {"ok": True}
+        # Verify auth header
+        req = mock_fn.call_args[0][0]
+        assert req.get_header("Authorization") == "Bearer secret-token"
+
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_401_returns_auth_error(self, mock_fn, monkeypatch):
+        monkeypatch.setenv("HERMES_TOKEN", "bad")
+        mock_fn.side_effect = urllib.error.HTTPError(
+            "u", 401, "Unauthorized", {}, None,
+        )
+        from tools.inter_agent_tool import _rpc_post
+        result, err = _rpc_post("http://127.0.0.1:18801", "tasks/send", {})
+        assert result is None
+        assert "auth" in err.lower()
+
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_network_error(self, mock_fn, monkeypatch):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        mock_fn.side_effect = urllib.error.URLError("Connection refused")
+        from tools.inter_agent_tool import _rpc_post
+        result, err = _rpc_post("http://127.0.0.1:18801", "tasks/get", {})
+        assert result is None
+        assert "not reachable" in err.lower()
+
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_jsonrpc_error_passthrough(self, mock_fn, monkeypatch):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        mock_fn.return_value = _mock_urlopen(
+            {"jsonrpc": "2.0", "id": "r", "error": {"code": -32001, "message": "Task not found"}}
+        )
+        from tools.inter_agent_tool import _rpc_post
+        result, err = _rpc_post("http://127.0.0.1:18801", "tasks/get", {"id": "x"})
+        assert result is None
+        assert "-32001" in err or "not found" in err.lower()
+
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_malformed_response(self, mock_fn, monkeypatch):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        mock = MagicMock()
+        mock.read.return_value = b"not-json"
+        mock.__enter__ = MagicMock(return_value=mock)
+        mock.__exit__ = MagicMock(return_value=False)
+        mock_fn.return_value = mock
+        from tools.inter_agent_tool import _rpc_post
+        result, err = _rpc_post("http://127.0.0.1:18801", "tasks/get", {})
+        assert result is None
+        assert "malformed" in err.lower()
