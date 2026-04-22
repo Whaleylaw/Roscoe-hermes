@@ -239,3 +239,81 @@ class TestListAgents:
         ids = [a["id"] for a in result["agents"]]
         assert "roscoe" not in ids
         assert "paralegal" in ids
+
+
+# ---------------------------------------------------------------------------
+# ask_agent
+# ---------------------------------------------------------------------------
+
+def _task_completed(task_id="tid", reply_text="hello back"):
+    return _mock_urlopen({
+        "jsonrpc": "2.0",
+        "id": "r",
+        "result": {
+            "id": task_id,
+            "status": {"state": "completed", "timestamp": "2026-04-22T00:00:00Z"},
+            "artifacts": [{
+                "parts": [{"type": "text", "text": reply_text}],
+                "metadata": {},
+            }],
+            "history": [],
+            "metadata": {},
+        },
+    })
+
+
+class TestAskAgent:
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_happy_path(self, mock_fn, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        mock_fn.return_value = _task_completed(reply_text="paralegal reply")
+        from tools.inter_agent_tool import ask_agent
+        out = json.loads(ask_agent("paralegal", "hello"))
+        assert out["status"] == "completed"
+        assert out["reply"] == "paralegal reply"
+        assert out["agent_id"] == "paralegal"
+        assert "task_id" in out
+
+    def test_self_call_rejected(self, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        monkeypatch.setenv("HERMES_A2A_SELF", "paralegal")
+        from tools.inter_agent_tool import ask_agent
+        out = json.loads(ask_agent("paralegal", "hi"))
+        assert "error" in out
+        assert "yourself" in out["error"].lower()
+
+    def test_unknown_agent(self, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        from tools.inter_agent_tool import ask_agent
+        out = json.loads(ask_agent("ghost", "hi"))
+        assert "error" in out
+        assert "ghost" in out["error"]
+
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_timeout_returns_recoverable_hint(self, mock_fn, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        mock_fn.side_effect = TimeoutError("read timed out")
+        from tools.inter_agent_tool import ask_agent
+        out = json.loads(ask_agent("paralegal", "hi"))
+        assert out["status"] == "timeout"
+        assert out["agent_id"] == "paralegal"
+        assert "task_id" in out
+        assert "check_agent_task" in out["hint"]
+
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_context_is_appended(self, mock_fn, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        mock_fn.return_value = _task_completed()
+        from tools.inter_agent_tool import ask_agent
+        ask_agent("paralegal", "Summarize", context="file X has Y")
+        req = mock_fn.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        text = body["params"]["message"]["parts"][0]["text"]
+        assert "Summarize" in text
+        assert "CONTEXT" in text
+        assert "file X has Y" in text

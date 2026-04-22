@@ -146,9 +146,13 @@ def _rpc_post(base_url: str, method: str, params: Dict[str, Any],
             return None, "Auth rejected by bridge. Check HERMES_TOKEN matches bridge config."
         return None, f"Bridge HTTP {exc.code}: {exc.reason}"
     except urllib.error.URLError as exc:
+        # Real urlopen timeouts arrive wrapped in URLError(reason=TimeoutError(...)).
+        if isinstance(exc.reason, TimeoutError):
+            return None, "timeout"
         return None, f"Bridge not reachable at {base_url}: {exc.reason}"
-    except TimeoutError as exc:
-        return None, f"Bridge timeout at {base_url}: {exc}"
+    except TimeoutError:
+        # Defensive: direct TimeoutError (e.g. tests mocking urlopen with side_effect=TimeoutError).
+        return None, "timeout"
 
     try:
         data = json.loads(body.decode("utf-8"))
@@ -207,6 +211,108 @@ def list_agents() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Message composition + validation helpers
+# ---------------------------------------------------------------------------
+
+def _compose_text(goal: str, context: Optional[str]) -> str:
+    goal = (goal or "").strip()
+    if context and context.strip():
+        return f"{goal}\n\nCONTEXT:\n{context.strip()}"
+    return goal
+
+
+def _validate_target(agent_id: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if not agent_id or not str(agent_id).strip():
+        return None, "agent_id is required"
+    self_id = _get_self_id()
+    if self_id and agent_id == self_id:
+        return None, (
+            f"Cannot send to yourself (agent_id={self_id}). "
+            "Use delegate_task for in-process subagents."
+        )
+    entry = _resolve_agent(agent_id)
+    if entry is None:
+        return None, (
+            f"Unknown agent_id: '{agent_id}'. Call list_agents to see available agents."
+        )
+    return entry, None
+
+
+def _extract_reply_text(task: Dict[str, Any]) -> str:
+    artifacts = task.get("artifacts") or []
+    if not artifacts:
+        return ""
+    parts = artifacts[0].get("parts") or []
+    for p in parts:
+        if p.get("type") == "text":
+            return p.get("text", "")
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# ask_agent
+# ---------------------------------------------------------------------------
+
+def ask_agent(agent_id: str, goal: str,
+              context: Optional[str] = None,
+              timeout: Optional[int] = None) -> str:
+    """Synchronously send a message to agent_id and return the reply."""
+    entry, err = _validate_target(agent_id)
+    if err:
+        return tool_error(err)
+
+    text = _compose_text(goal, context)
+    if not text:
+        return tool_error("goal is required")
+
+    task_id = str(uuid.uuid4())
+    effective_timeout = timeout or _get_timeout()
+    params = {
+        "id": task_id,
+        "message": {"role": "user", "parts": [{"type": "text", "text": text}]},
+    }
+
+    try:
+        result, err = _rpc_post(entry["a2a_url"], "tasks/send", params,
+                                timeout=effective_timeout)
+    except TimeoutError:
+        err = "timeout"
+        result = None
+
+    if err == "timeout" or (err and "timeout" in err.lower()):
+        return json.dumps({
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "status": "timeout",
+            "hint": (
+                "Task may still complete on the bridge. "
+                "Call check_agent_task with this task_id."
+            ),
+        })
+
+    if err:
+        return json.dumps({
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "status": "error",
+            "error": err,
+        })
+
+    task = result or {}
+    state = (task.get("status") or {}).get("state", "unknown")
+    out = {
+        "agent_id": agent_id,
+        "task_id": task.get("id", task_id),
+        "status": state,
+    }
+    if state == "completed":
+        out["reply"] = _extract_reply_text(task)
+    elif state in ("failed", "canceled"):
+        out["error"] = _extract_reply_text(task) or f"task ended in state {state}"
+    return json.dumps(out, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
 
@@ -233,4 +339,54 @@ registry.register(
     handler=lambda args, **kw: list_agents(),
     check_fn=_check_inter_agent_available,
     emoji="👥",
+)
+
+ASK_AGENT_SCHEMA = {
+    "name": "ask_agent",
+    "description": (
+        "Synchronously send a message to a peer Hermes agent and wait for its "
+        "reply. Each peer agent has its own profile, model, and context. "
+        "Use list_agents first to pick a target. Blocks up to INTER_AGENT_TIMEOUT "
+        "seconds (default 120). If the call times out, the returned task_id can "
+        "be polled with check_agent_task."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "agent_id": {
+                "type": "string",
+                "description": "Peer agent id from list_agents (e.g. 'paralegal').",
+            },
+            "goal": {
+                "type": "string",
+                "description": "What you want the peer agent to do or answer.",
+            },
+            "context": {
+                "type": "string",
+                "description": (
+                    "Optional background the peer needs (file paths, prior findings, "
+                    "constraints). Peers don't share your conversation."
+                ),
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Optional per-call timeout in seconds. Defaults to INTER_AGENT_TIMEOUT.",
+            },
+        },
+        "required": ["agent_id", "goal"],
+    },
+}
+
+registry.register(
+    name="ask_agent",
+    toolset="inter_agent",
+    schema=ASK_AGENT_SCHEMA,
+    handler=lambda args, **kw: ask_agent(
+        agent_id=args.get("agent_id"),
+        goal=args.get("goal"),
+        context=args.get("context"),
+        timeout=args.get("timeout"),
+    ),
+    check_fn=_check_inter_agent_available,
+    emoji="💬",
 )
