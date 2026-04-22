@@ -765,6 +765,33 @@ class APIServerAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("unified_timeline record_outbound failed: %s", e)
 
+    def _record_error_outbound_timeline(
+        self, *, turn_handle: Optional[TurnHandle], err_message: str,
+    ) -> None:
+        """Record an error-path outbound so the inbound turn isn't orphaned.
+
+        When ``_compute_completion`` / ``_compute_response`` raises
+        after the inbound row has already been written, skipping the
+        outbound record leaves the timeline with an unanswered user
+        turn.  The next cross-channel context read would then show the
+        agent in a "user is waiting for a reply" state that no longer
+        reflects reality — closing the turn with the error string that
+        actually shipped to the client keeps the timeline honest.
+
+        Mirrors ``GatewayRunner._record_error_outbound`` in
+        ``gateway/run.py``; best-effort, never raises.
+        """
+        if turn_handle is None or not err_message:
+            return
+        try:
+            self._record_outbound_timeline(
+                turn_handle=turn_handle, content=err_message,
+            )
+        except Exception as e:
+            logger.warning(
+                "unified_timeline record_outbound (error path) failed: %s", e,
+            )
+
     # ------------------------------------------------------------------
     # Agent creation helper
     # ------------------------------------------------------------------
@@ -1085,8 +1112,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_completion)
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
+                err_message = f"Internal server error: {e}"
+                # Close the loop on the unified timeline so the
+                # already-recorded inbound row isn't orphaned.
+                self._record_error_outbound_timeline(
+                    turn_handle=turn_handle, err_message=err_message,
+                )
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    _openai_error(err_message, err_type="server_error"),
                     status=500,
                 )
         else:
@@ -1094,8 +1127,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _compute_completion()
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
+                err_message = f"Internal server error: {e}"
+                self._record_error_outbound_timeline(
+                    turn_handle=turn_handle, err_message=err_message,
+                )
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    _openai_error(err_message, err_type="server_error"),
                     status=500,
                 )
 
@@ -1952,8 +1989,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_response)
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
+                err_message = f"Internal server error: {e}"
+                self._record_error_outbound_timeline(
+                    turn_handle=turn_handle, err_message=err_message,
+                )
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    _openai_error(err_message, err_type="server_error"),
                     status=500,
                 )
         else:
@@ -1961,8 +2002,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _compute_response()
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
+                err_message = f"Internal server error: {e}"
+                self._record_error_outbound_timeline(
+                    turn_handle=turn_handle, err_message=err_message,
+                )
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    _openai_error(err_message, err_type="server_error"),
                     status=500,
                 )
 

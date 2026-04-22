@@ -2373,3 +2373,85 @@ class TestUnifiedTimelineWiring:
             assert rows[2]["content"] == "msg from client-B"
         finally:
             db.close()
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_error_path_records_outbound(
+        self, tmp_path, monkeypatch,
+    ):
+        """When _compute_completion raises, the inbound turn must still
+        be closed on the unified timeline with the error string that
+        shipped to the client — otherwise the inbound is orphaned and
+        the next cross-channel turn reads a stuck "user waiting" state.
+        """
+        adapter, db = self._make_ut_adapter(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "gateway.unified_timeline.get_active_profile_name",
+            lambda: "default",
+        )
+        try:
+            async def _boom(**kwargs):
+                raise RuntimeError("provider exploded")
+
+            app = _create_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_run_agent", side_effect=_boom):
+                    resp = await cli.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": "hermes-agent",
+                            "messages": [{"role": "user", "content": "ping"}],
+                        },
+                    )
+                    assert resp.status == 500
+
+            rows = db.get_timeline_messages(profile_id="default")
+            # Inbound + error outbound — the inbound isn't orphaned.
+            assert len(rows) == 2, (
+                f"expected inbound + error outbound, got {len(rows)} rows"
+            )
+            assert rows[0]["direction"] == "inbound"
+            assert rows[0]["content"] == "ping"
+            assert rows[1]["direction"] == "outbound"
+            # Error string contains the sentinel from _openai_error.
+            assert "Internal server error" in (rows[1]["content"] or "")
+            assert "provider exploded" in (rows[1]["content"] or "")
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_responses_endpoint_error_path_records_outbound(
+        self, tmp_path, monkeypatch,
+    ):
+        """Same guarantee for /v1/responses: an exception from the
+        agent must not leave a dangling inbound row.
+        """
+        adapter, db = self._make_ut_adapter(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "gateway.unified_timeline.get_active_profile_name",
+            lambda: "default",
+        )
+        try:
+            async def _boom(**kwargs):
+                raise RuntimeError("responses blew up")
+
+            app = _create_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_run_agent", side_effect=_boom):
+                    resp = await cli.post(
+                        "/v1/responses",
+                        json={
+                            "model": "hermes-agent",
+                            "input": "hello",
+                        },
+                    )
+                    assert resp.status == 500
+
+            rows = db.get_timeline_messages(profile_id="default")
+            assert len(rows) == 2
+            assert rows[0]["direction"] == "inbound"
+            assert rows[0]["content"] == "hello"
+            assert rows[1]["direction"] == "outbound"
+            assert "Internal server error" in (rows[1]["content"] or "")
+            assert "responses blew up" in (rows[1]["content"] or "")
+        finally:
+            db.close()
