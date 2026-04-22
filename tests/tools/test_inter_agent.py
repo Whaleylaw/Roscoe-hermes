@@ -449,3 +449,84 @@ class TestToolsetRegistration:
             "list_agents", "ask_agent",
             "dispatch_agent_task", "check_agent_task",
         }
+
+
+# ---------------------------------------------------------------------------
+# Failure-text extraction symmetry between ask_agent and check_agent_task
+# ---------------------------------------------------------------------------
+
+class TestFailureTextSymmetry:
+    def test_failure_from_status_message_surfaces_via_ask_and_check(self, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+
+        failed_task = {
+            "id": "tid",
+            "status": {
+                "state": "failed",
+                "timestamp": "2026-04-22T00:00:00Z",
+                "message": {
+                    "role": "agent",
+                    "parts": [{"type": "text", "text": "upstream boom"}],
+                },
+            },
+            "artifacts": [],
+            "history": [],
+            "metadata": {},
+        }
+
+        with patch("tools.inter_agent_tool.urllib.request.urlopen") as mock_fn:
+            mock_fn.return_value = _mock_urlopen({
+                "jsonrpc": "2.0", "id": "r", "result": failed_task,
+            })
+            from tools.inter_agent_tool import ask_agent
+            ask_out = json.loads(ask_agent("paralegal", "hi"))
+
+        with patch("tools.inter_agent_tool.urllib.request.urlopen") as mock_fn:
+            mock_fn.return_value = _mock_urlopen({
+                "jsonrpc": "2.0", "id": "r", "result": failed_task,
+            })
+            from tools.inter_agent_tool import check_agent_task
+            check_out = json.loads(check_agent_task("paralegal", "tid"))
+
+        assert ask_out["status"] == "failed"
+        assert check_out["status"] == "failed"
+        assert "upstream boom" in ask_out["error"]
+        assert "upstream boom" in check_out["error"]
+        assert ask_out["error"] == check_out["error"]
+
+    def test_failure_from_artifacts_surfaces_via_ask_and_check(self, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+
+        failed_task = {
+            "id": "tid",
+            "status": {
+                "state": "failed",
+                "timestamp": "2026-04-22T00:00:00Z",
+            },
+            "artifacts": [{
+                "parts": [{"type": "text", "text": "Error calling Hermes: rate limit"}],
+                "metadata": {},
+            }],
+            "history": [],
+            "metadata": {},
+        }
+
+        with patch("tools.inter_agent_tool.urllib.request.urlopen") as mock_fn:
+            mock_fn.return_value = _mock_urlopen({
+                "jsonrpc": "2.0", "id": "r", "result": failed_task,
+            })
+            from tools.inter_agent_tool import ask_agent
+            ask_out = json.loads(ask_agent("paralegal", "hi"))
+
+        with patch("tools.inter_agent_tool.urllib.request.urlopen") as mock_fn:
+            mock_fn.return_value = _mock_urlopen({
+                "jsonrpc": "2.0", "id": "r", "result": failed_task,
+            })
+            from tools.inter_agent_tool import check_agent_task
+            check_out = json.loads(check_agent_task("paralegal", "tid"))
+
+        assert "rate limit" in ask_out["error"]
+        assert "rate limit" in check_out["error"]
+        assert ask_out["error"] == check_out["error"]

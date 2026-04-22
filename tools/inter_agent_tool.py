@@ -308,7 +308,7 @@ def ask_agent(agent_id: str, goal: str,
     if state == "completed":
         out["reply"] = _extract_reply_text(task)
     elif state in ("failed", "canceled"):
-        out["error"] = _extract_reply_text(task) or f"task ended in state {state}"
+        out["error"] = _extract_failure_text(task) or f"task ended in state {state}"
     return json.dumps(out, ensure_ascii=False)
 
 
@@ -343,6 +343,10 @@ def dispatch_agent_task(agent_id: str, goal: str,
         "message": {"role": "user", "parts": [{"type": "text", "text": text}]},
     }
 
+    # Fire-and-forget: one daemon thread per dispatch, no cap. Acceptable for
+    # interactive single-session LLM use. If an agent ever starts dispatching
+    # in a loop (see spec deferred: hop-counter depth limiting), add a module-
+    # level BoundedSemaphore here to cap concurrent in-flight dispatches.
     thread = threading.Thread(
         target=_dispatch_fire_and_forget,
         args=(entry["a2a_url"], params, agent_id, task_id),
@@ -369,6 +373,17 @@ def _extract_status_message(task: Dict[str, Any]) -> str:
         if p.get("type") == "text":
             return p.get("text", "")
     return ""
+
+
+def _extract_failure_text(task: Dict[str, Any]) -> str:
+    """Best-effort failure text from either status.message or artifacts.
+
+    A task that went through the streaming path carries its error in
+    status.message. A task from the sync tasks/send path can carry the
+    error text as its artifact body. Try both so ask_agent and
+    check_agent_task surface the same text for the same failed task.
+    """
+    return _extract_status_message(task) or _extract_reply_text(task)
 
 
 def check_agent_task(agent_id: str, task_id: str) -> str:
@@ -404,7 +419,7 @@ def check_agent_task(agent_id: str, task_id: str) -> str:
     if state == "completed":
         out["reply"] = _extract_reply_text(task)
     elif state in ("failed", "canceled"):
-        out["error"] = _extract_status_message(task) or f"task ended in state {state}"
+        out["error"] = _extract_failure_text(task) or f"task ended in state {state}"
     return json.dumps(out, ensure_ascii=False)
 
 
