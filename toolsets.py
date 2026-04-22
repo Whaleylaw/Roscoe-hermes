@@ -192,6 +192,17 @@ TOOLSETS = {
         "includes": []
     },
 
+    "inter_agent": {
+        "description": "Discover and message peer Hermes agents via the A2A bridge",
+        "tools": [
+            "list_agents",
+            "ask_agent",
+            "dispatch_agent_task",
+            "check_agent_task",
+        ],
+        "includes": []
+    },
+
     # "honcho" toolset removed — Honcho is now a memory provider plugin.
     # Tools are injected via MemoryManager, not the toolset system.
 

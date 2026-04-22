@@ -434,3 +434,18 @@ class TestCheckAgentTask:
         from tools.inter_agent_tool import check_agent_task
         out = json.loads(check_agent_task("ghost", "tid"))
         assert "error" in out
+
+
+# ---------------------------------------------------------------------------
+# Toolset registration
+# ---------------------------------------------------------------------------
+
+class TestToolsetRegistration:
+    def test_inter_agent_toolset_listed(self):
+        from toolsets import TOOLSETS
+        assert "inter_agent" in TOOLSETS
+        tools = set(TOOLSETS["inter_agent"]["tools"])
+        assert tools == {
+            "list_agents", "ask_agent",
+            "dispatch_agent_task", "check_agent_task",
+        }
