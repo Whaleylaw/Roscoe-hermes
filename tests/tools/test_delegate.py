@@ -69,6 +69,16 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("max_iterations", props)
         self.assertNotIn("maxItems", props["tasks"])  # removed — limit is now runtime-configurable
 
+    def test_inter_agent_tools_are_blocked(self):
+        blocked = DELEGATE_BLOCKED_TOOLS
+        for name in (
+            "list_agents",
+            "ask_agent",
+            "dispatch_agent_task",
+            "check_agent_task",
+        ):
+            assert name in blocked, f"{name} should be in DELEGATE_BLOCKED_TOOLS"
+
 
 class TestChildSystemPrompt(unittest.TestCase):
     def test_goal_only(self):

@@ -30,11 +30,16 @@ from toolsets import TOOLSETS
 
 # Tools that children must never have access to
 DELEGATE_BLOCKED_TOOLS = frozenset([
-    "delegate_task",   # no recursive delegation
-    "clarify",         # no user interaction
-    "memory",          # no writes to shared MEMORY.md
-    "send_message",    # no cross-platform side effects
-    "execute_code",    # children should reason step-by-step, not write scripts
+    "delegate_task",         # no recursive delegation
+    "clarify",               # no user interaction
+    "memory",                # no writes to shared MEMORY.md
+    "send_message",          # no cross-platform side effects
+    "execute_code",          # children should reason step-by-step, not write scripts
+    # inter_agent toolset — subagents must not bypass depth limits via A2A
+    "list_agents",
+    "ask_agent",
+    "dispatch_agent_task",
+    "check_agent_task",
 ])
 
 # Build a description fragment listing toolsets available for subagents.
