@@ -212,6 +212,7 @@ class TestListAgents:
         result = json.loads(list_agents())
         assert "agents" in result
         ids = [a["id"] for a in result["agents"]]
+        assert len(ids) == 2, f"expected only hermes peers, got {ids}"
         assert "roscoe" in ids
         assert "paralegal" in ids
         for a in result["agents"]:

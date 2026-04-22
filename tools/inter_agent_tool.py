@@ -168,6 +168,11 @@ def _rpc_post(base_url: str, method: str, params: Dict[str, Any],
 # ---------------------------------------------------------------------------
 
 def _probe_health(a2a_url: str) -> bool:
+    """GET {a2a_url}/health with a 3s timeout; return True iff body is {'ok': true}.
+
+    /health is unauthenticated per the bridge design — no Authorization header.
+    Any exception (network, timeout, bad JSON, ok=false) returns False.
+    """
     health_url = a2a_url.rstrip("/") + "/health"
     try:
         with urllib.request.urlopen(health_url, timeout=HEALTH_FANOUT_TIMEOUT_SECONDS) as resp:
@@ -180,6 +185,8 @@ def _probe_health(a2a_url: str) -> bool:
 def list_agents() -> str:
     """Return registered peer agents with live online/offline status."""
     self_id = _get_self_id()
+    # When HERMES_A2A_SELF is unset, self_id is None and != None keeps all
+    # entries (degraded mode — spec calls this out as expected).
     entries = [e for e in _load_registry() if e.get("id") != self_id]
 
     urls = [e.get("a2a_url", "") for e in entries]
