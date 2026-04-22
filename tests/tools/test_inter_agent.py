@@ -356,3 +356,81 @@ class TestDispatchAgentTask:
         from tools.inter_agent_tool import dispatch_agent_task
         out = json.loads(dispatch_agent_task("ghost", "x"))
         assert "error" in out
+
+
+# ---------------------------------------------------------------------------
+# check_agent_task
+# ---------------------------------------------------------------------------
+
+def _task_in_state(state, task_id="tid", reply_text="", error_text=""):
+    artifacts = []
+    if reply_text:
+        artifacts = [{"parts": [{"type": "text", "text": reply_text}], "metadata": {}}]
+    status = {"state": state, "timestamp": "2026-04-22T00:00:00Z"}
+    if error_text:
+        status["message"] = {
+            "role": "agent",
+            "parts": [{"type": "text", "text": error_text}],
+        }
+    return _mock_urlopen({
+        "jsonrpc": "2.0",
+        "id": "r",
+        "result": {
+            "id": task_id,
+            "status": status,
+            "artifacts": artifacts,
+            "history": [],
+            "metadata": {},
+        },
+    })
+
+
+class TestCheckAgentTask:
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_working(self, mock_fn, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        mock_fn.return_value = _task_in_state("working")
+        from tools.inter_agent_tool import check_agent_task
+        out = json.loads(check_agent_task("paralegal", "tid"))
+        assert out["status"] == "working"
+
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_completed_returns_reply(self, mock_fn, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        mock_fn.return_value = _task_in_state("completed", reply_text="done!")
+        from tools.inter_agent_tool import check_agent_task
+        out = json.loads(check_agent_task("paralegal", "tid"))
+        assert out["status"] == "completed"
+        assert out["reply"] == "done!"
+
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_failed_returns_error(self, mock_fn, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        mock_fn.return_value = _task_in_state("failed", error_text="boom")
+        from tools.inter_agent_tool import check_agent_task
+        out = json.loads(check_agent_task("paralegal", "tid"))
+        assert out["status"] == "failed"
+        assert "boom" in out["error"]
+
+    @patch("tools.inter_agent_tool.urllib.request.urlopen")
+    def test_task_not_found(self, mock_fn, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        mock_fn.return_value = _mock_urlopen({
+            "jsonrpc": "2.0", "id": "r",
+            "error": {"code": -32001, "message": "Task not found: tid"},
+        })
+        from tools.inter_agent_tool import check_agent_task
+        out = json.loads(check_agent_task("paralegal", "tid"))
+        assert out["status"] == "unknown"
+        assert "not found" in out["error"].lower()
+
+    def test_unknown_agent(self, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        from tools.inter_agent_tool import check_agent_task
+        out = json.loads(check_agent_task("ghost", "tid"))
+        assert "error" in out

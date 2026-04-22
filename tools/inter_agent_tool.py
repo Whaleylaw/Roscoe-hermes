@@ -359,6 +359,56 @@ def dispatch_agent_task(agent_id: str, goal: str,
 
 
 # ---------------------------------------------------------------------------
+# check_agent_task
+# ---------------------------------------------------------------------------
+
+def _extract_status_message(task: Dict[str, Any]) -> str:
+    msg = (task.get("status") or {}).get("message") or {}
+    parts = msg.get("parts") or []
+    for p in parts:
+        if p.get("type") == "text":
+            return p.get("text", "")
+    return ""
+
+
+def check_agent_task(agent_id: str, task_id: str) -> str:
+    """Poll a previously dispatched task and return its current state."""
+    entry = _resolve_agent(agent_id)
+    if entry is None:
+        return tool_error(
+            f"Unknown agent_id: '{agent_id}'. Call list_agents to see available agents."
+        )
+
+    result, err = _rpc_post(entry["a2a_url"], "tasks/get", {"id": task_id})
+
+    if err and "-32001" in err:
+        return json.dumps({
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "status": "unknown",
+            "error": (
+                "task not found on bridge — may have been lost to bridge restart"
+            ),
+        })
+    if err:
+        return json.dumps({
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "status": "error",
+            "error": err,
+        })
+
+    task = result or {}
+    state = (task.get("status") or {}).get("state", "unknown")
+    out = {"agent_id": agent_id, "task_id": task_id, "status": state}
+    if state == "completed":
+        out["reply"] = _extract_reply_text(task)
+    elif state in ("failed", "canceled"):
+        out["error"] = _extract_status_message(task) or f"task ended in state {state}"
+    return json.dumps(out, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
 
@@ -472,4 +522,35 @@ registry.register(
     ),
     check_fn=_check_inter_agent_available,
     emoji="📤",
+)
+
+CHECK_AGENT_TASK_SCHEMA = {
+    "name": "check_agent_task",
+    "description": (
+        "Poll the status of a peer agent task previously returned by "
+        "dispatch_agent_task (or ask_agent when it returned 'timeout'). "
+        "Returns current state: 'working', 'completed' (with reply), 'failed' "
+        "or 'canceled' (with error), or 'unknown' if the bridge no longer "
+        "holds the task."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Peer agent id."},
+            "task_id": {"type": "string", "description": "Task id to check."},
+        },
+        "required": ["agent_id", "task_id"],
+    },
+}
+
+registry.register(
+    name="check_agent_task",
+    toolset="inter_agent",
+    schema=CHECK_AGENT_TASK_SCHEMA,
+    handler=lambda args, **kw: check_agent_task(
+        agent_id=args.get("agent_id"),
+        task_id=args.get("task_id"),
+    ),
+    check_fn=_check_inter_agent_available,
+    emoji="🔎",
 )
