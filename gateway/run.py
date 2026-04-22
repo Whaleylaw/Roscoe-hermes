@@ -595,9 +595,13 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
 def maybe_run_unified_timeline_migration() -> None:
     """Run the one-shot legacy → unified_timeline migration if needed.
 
-    Writes a flag file to HERMES_HOME on completion so subsequent gateway
-    starts skip the walk. Manual reruns via ``scripts/migrate_to_unified_timeline.py``
-    are always safe.
+    ``migrate()`` itself writes the flag file at
+    ``HERMES_HOME/.unified_timeline_migrated`` on successful completion;
+    subsequent gateway starts see the flag and return early. If a
+    migration fails (no flag written), the next startup will retry —
+    which is correct: the migrator is idempotent, and a visible re-run
+    beats a silent paper-over. Manual reruns via
+    ``scripts/migrate_to_unified_timeline.py`` are always safe.
     """
     from hermes_constants import get_hermes_home
     from hermes_cli.profiles import get_active_profile_name
@@ -615,20 +619,6 @@ def maybe_run_unified_timeline_migration() -> None:
         logging.getLogger(__name__).warning(
             "unified_timeline migration failed: %s — continuing startup", exc,
         )
-        return
-    # Ensure the flag file exists even if ``migrate()`` did not write one
-    # (e.g. a patched/stub implementation in tests). This is the guard
-    # that actually prevents the startup hook from re-running on the
-    # next boot — without it, a stubbed migrator would re-fire forever.
-    if not flag.exists():
-        try:
-            flag.parent.mkdir(parents=True, exist_ok=True)
-            flag.write_text("migrated\n")
-        except Exception as _flag_err:
-            import logging
-            logging.getLogger(__name__).warning(
-                "unified_timeline flag write failed: %s", _flag_err,
-            )
 
 
 class GatewayRunner:

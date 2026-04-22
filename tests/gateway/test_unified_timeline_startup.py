@@ -20,6 +20,12 @@ def test_startup_runs_migration_once(tmp_path, monkeypatch):
 
     def fake_migrate(*, db_path=None, profile_id="default"):
         called.append(profile_id)
+        # Mirror the real migrator's contract — T9's ``migrate()`` writes
+        # the flag file itself on successful completion, so the stub
+        # must do the same for the idempotency guard to hold.
+        (hermes_home / ".unified_timeline_migrated").write_text(
+            "migrated 0 rows\n"
+        )
         return 0
 
     # Monkeypatch the import site.
