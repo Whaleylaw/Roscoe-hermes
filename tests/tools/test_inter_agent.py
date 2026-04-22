@@ -317,3 +317,42 @@ class TestAskAgent:
         assert "Summarize" in text
         assert "CONTEXT" in text
         assert "file X has Y" in text
+
+
+# ---------------------------------------------------------------------------
+# dispatch_agent_task
+# ---------------------------------------------------------------------------
+
+class TestDispatchAgentTask:
+    @patch("tools.inter_agent_tool.threading.Thread")
+    def test_happy_path_returns_immediately(self, mock_thread, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        t_instance = MagicMock()
+        mock_thread.return_value = t_instance
+        from tools.inter_agent_tool import dispatch_agent_task
+        out = json.loads(dispatch_agent_task("paralegal", "long job"))
+        assert out["status"] == "dispatched"
+        assert out["agent_id"] == "paralegal"
+        assert "task_id" in out
+        # Thread was created and started
+        mock_thread.assert_called_once()
+        t_instance.start.assert_called_once()
+        # Thread is daemon
+        assert mock_thread.call_args.kwargs.get("daemon") is True
+
+    def test_self_call_rejected(self, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        monkeypatch.setenv("HERMES_A2A_SELF", "paralegal")
+        from tools.inter_agent_tool import dispatch_agent_task
+        out = json.loads(dispatch_agent_task("paralegal", "x"))
+        assert "error" in out
+        assert "yourself" in out["error"].lower()
+
+    def test_unknown_agent(self, monkeypatch, registry_file):
+        monkeypatch.setenv("HERMES_TOKEN", "t")
+        monkeypatch.setenv("A2A_REGISTRY_PATH", registry_file)
+        from tools.inter_agent_tool import dispatch_agent_task
+        out = json.loads(dispatch_agent_task("ghost", "x"))
+        assert "error" in out

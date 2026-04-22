@@ -313,6 +313,52 @@ def ask_agent(agent_id: str, goal: str,
 
 
 # ---------------------------------------------------------------------------
+# dispatch_agent_task
+# ---------------------------------------------------------------------------
+
+def _dispatch_fire_and_forget(a2a_url: str, params: Dict[str, Any],
+                               agent_id: str, task_id: str) -> None:
+    """Runs in a daemon thread. Logs outcome; does not raise."""
+    result, err = _rpc_post(a2a_url, "tasks/send", params)
+    if err:
+        logger.warning(
+            "dispatch_agent_task(%s task=%s) failed: %s", agent_id, task_id, err,
+        )
+
+
+def dispatch_agent_task(agent_id: str, goal: str,
+                        context: Optional[str] = None) -> str:
+    """Fire a task at agent_id and return a task_id immediately."""
+    entry, err = _validate_target(agent_id)
+    if err:
+        return tool_error(err)
+
+    text = _compose_text(goal, context)
+    if not text:
+        return tool_error("goal is required")
+
+    task_id = str(uuid.uuid4())
+    params = {
+        "id": task_id,
+        "message": {"role": "user", "parts": [{"type": "text", "text": text}]},
+    }
+
+    thread = threading.Thread(
+        target=_dispatch_fire_and_forget,
+        args=(entry["a2a_url"], params, agent_id, task_id),
+        daemon=True,
+        name=f"inter-agent-dispatch-{agent_id}-{task_id[:8]}",
+    )
+    thread.start()
+
+    return json.dumps({
+        "agent_id": agent_id,
+        "task_id": task_id,
+        "status": "dispatched",
+    })
+
+
+# ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
 
@@ -389,4 +435,41 @@ registry.register(
     ),
     check_fn=_check_inter_agent_available,
     emoji="💬",
+)
+
+DISPATCH_AGENT_TASK_SCHEMA = {
+    "name": "dispatch_agent_task",
+    "description": (
+        "Asynchronously dispatch a task to a peer Hermes agent. Returns a "
+        "task_id immediately without waiting for completion. Use "
+        "check_agent_task with the returned task_id to poll for results. "
+        "Prefer ask_agent for quick Q&A; use this for jobs expected to take "
+        "longer than a single response (e.g. document analysis, multi-step "
+        "research)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Peer agent id."},
+            "goal": {"type": "string", "description": "What to do."},
+            "context": {
+                "type": "string",
+                "description": "Optional background for the peer.",
+            },
+        },
+        "required": ["agent_id", "goal"],
+    },
+}
+
+registry.register(
+    name="dispatch_agent_task",
+    toolset="inter_agent",
+    schema=DISPATCH_AGENT_TASK_SCHEMA,
+    handler=lambda args, **kw: dispatch_agent_task(
+        agent_id=args.get("agent_id"),
+        goal=args.get("goal"),
+        context=args.get("context"),
+    ),
+    check_fn=_check_inter_agent_available,
+    emoji="📤",
 )
