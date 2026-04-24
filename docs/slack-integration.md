@@ -81,6 +81,24 @@ platforms:
 
 ---
 
+## Session model
+
+- **Unified timeline** is on by default (`gateway.unified_timeline.enabled`).
+  All inbound messages for a profile merge into one cross-channel
+  conversation: the home Slack channel, DMs, Telegram, OpenWebUI, and
+  anything else on that profile share one agent memory.
+- **Isolated sessions** opt out via `SessionSource.session_isolated`. The
+  turn reads only its per-session transcript and its rows do not append
+  to the profile timeline. Slack sets the flag whenever a channel has a
+  `channel_cwd` override — so Paralegal's case channels each keep their
+  own conversation, while `#perry` + DMs stay in the unified view.
+- The agent can still inspect isolated sessions on demand (tools can
+  read the per-session transcript files / SQLite rows directly from the
+  unified session).
+
+Feature commit: `157fcae6`. Files touched: `gateway/session.py`,
+`gateway/platforms/slack.py`, `gateway/run.py`.
+
 ## Paralegal: per-case channel wiring
 
 Paralegal's workflow has a dedicated Slack channel for every active case.
@@ -97,7 +115,20 @@ Channel name matches the case folder slug (e.g. `#abby-sitgraves` ↔
    `build_context_files_prompt` reads from cwd.
 4. Terminal/file tools scoped to the case folder → follows from (2).
 
-### Code patch (commit `2c6ad99a`)
+### Code patches
+
+Two related commits power the Paralegal setup. Re-apply both if an
+upstream merge drops any of the files listed.
+
+**`157fcae6` — per-source isolation from unified timeline**
+
+- `gateway/session.py`: `SessionSource.session_isolated` field + opt-out
+  in `load_agent_context`.
+- `gateway/run.py`: skip `record_inbound`/`record_outbound` when isolated.
+- `gateway/platforms/slack.py`: mark source isolated when `channel_cwd`
+  is set.
+
+**`2c6ad99a` — per-channel cwd override**
 
 `feat(slack): per-channel cwd override for case-scoped sessions`.
 Eight files; ~140 added lines. **If an upstream merge drops any of these,
