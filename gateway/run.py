@@ -4742,6 +4742,11 @@ class GatewayRunner:
                 getattr(self.config, "unified_timeline", None)
                 and self.config.unified_timeline.enabled
                 and self._session_db is not None
+                # Isolated sources (e.g. Slack case channels) don't join the
+                # profile-wide unified timeline — their turns stay in the
+                # per-session transcript only.  ``turn_handle`` stays None so
+                # the outbound write below is likewise skipped.
+                and not source.session_isolated
             ):
                 try:
                     ut = UnifiedTimeline.for_active_profile(db=self._session_db)

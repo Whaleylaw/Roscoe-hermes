@@ -83,6 +83,12 @@ class SessionSource:
     user_id_alt: Optional[str] = None  # Platform-specific stable alt ID (Signal UUID, Feishu union_id)
     chat_id_alt: Optional[str] = None  # Signal group internal ID
     is_bot: bool = False  # True when the message author is a bot/webhook (Discord)
+    # When True, this source is treated as an isolated session even when the
+    # profile's unified_timeline is enabled.  Reads pull from the per-session
+    # transcript, writes skip the profile-wide timeline.  Set by Slack for
+    # case-scoped channels (channel_cwds) so each case keeps its own history
+    # without leaking into the cross-channel unified view.
+    session_isolated: bool = False
     
     @property
     def description(self) -> str:
@@ -120,6 +126,8 @@ class SessionSource:
             d["user_id_alt"] = self.user_id_alt
         if self.chat_id_alt:
             d["chat_id_alt"] = self.chat_id_alt
+        if self.session_isolated:
+            d["session_isolated"] = True
         return d
     
     @classmethod
@@ -135,6 +143,7 @@ class SessionSource:
             chat_topic=data.get("chat_topic"),
             user_id_alt=data.get("user_id_alt"),
             chat_id_alt=data.get("chat_id_alt"),
+            session_isolated=bool(data.get("session_isolated", False)),
         )
     
 
@@ -1325,6 +1334,7 @@ class SessionStore:
         if (
             getattr(self.config, "unified_timeline", None)
             and self.config.unified_timeline.enabled
+            and not (source is not None and source.session_isolated)
         ):
             from hermes_cli.profiles import get_active_profile_name
             return self.load_timeline_conversation(
