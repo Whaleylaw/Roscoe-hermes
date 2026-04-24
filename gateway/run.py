@@ -4704,6 +4704,7 @@ class GatewayRunner:
                 run_generation=run_generation,
                 event_message_id=event.message_id,
                 channel_prompt=event.channel_prompt,
+                channel_cwd=event.channel_cwd,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -9489,6 +9490,7 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        channel_cwd: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -10330,11 +10332,18 @@ class GatewayRunner:
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
+            # Pin per-turn cwd (e.g. Slack channel_cwds) via ContextVar so the
+            # terminal tool, file tools, and AGENTS.md loader all resolve to
+            # the case folder without racing the process-wide TERMINAL_CWD.
+            from agent.turn_context import turn_cwd_var as _turn_cwd_var
+            _cwd_token = _turn_cwd_var.set(channel_cwd) if channel_cwd else None
             try:
                 result = agent.run_conversation(message, conversation_history=agent_history, task_id=session_id)
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
+                if _cwd_token is not None:
+                    _turn_cwd_var.reset(_cwd_token)
             result_holder[0] = result
 
             # Signal the stream consumer that the agent is done
@@ -10952,6 +10961,7 @@ class GatewayRunner:
                 next_message = pending
                 next_message_id = None
                 next_channel_prompt = None
+                next_channel_cwd = None
                 if pending_event is not None:
                     next_source = getattr(pending_event, "source", None) or source
                     next_message = await self._prepare_inbound_message_text(
@@ -10963,6 +10973,7 @@ class GatewayRunner:
                         return result
                     next_message_id = getattr(pending_event, "message_id", None)
                     next_channel_prompt = getattr(pending_event, "channel_prompt", None)
+                    next_channel_cwd = getattr(pending_event, "channel_cwd", None)
 
                 # Restart typing indicator so the user sees activity while
                 # the follow-up turn runs.  The outer _process_message_background
@@ -10988,6 +10999,7 @@ class GatewayRunner:
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
+                    channel_cwd=next_channel_cwd,
                 )
         finally:
             # Stop progress sender, interrupt monitor, and notification task

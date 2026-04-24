@@ -843,7 +843,11 @@ def _get_env_config() -> Dict[str, Any]:
     # If Docker cwd passthrough is explicitly enabled, remap the host path to
     # /workspace and track the original host path separately. Otherwise keep the
     # normal sandbox behavior and discard host paths.
-    cwd = os.getenv("TERMINAL_CWD", default_cwd)
+    # Per-turn override (agent.turn_context.turn_cwd_var) wins over the env var
+    # so channel-scoped turns (e.g. Slack channel_cwds) don't race the
+    # process-wide TERMINAL_CWD across concurrent sessions.
+    from agent.turn_context import get_turn_cwd
+    cwd = get_turn_cwd() or os.getenv("TERMINAL_CWD", default_cwd)
     host_cwd = None
     host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
     if env_type == "docker" and mount_docker_cwd:

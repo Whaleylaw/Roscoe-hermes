@@ -4304,7 +4304,10 @@ class AIAgent:
             # mode).  The gateway process runs from the hermes-agent install
             # dir, so os.getcwd() would pick up the repo's AGENTS.md and
             # other dev files — inflating token usage by ~10k for no benefit.
-            _context_cwd = os.getenv("TERMINAL_CWD") or None
+            # Per-turn override (e.g. Slack channel_cwds) wins so each case
+            # channel loads its own AGENTS.md deterministically.
+            from agent.turn_context import get_turn_cwd as _get_turn_cwd
+            _context_cwd = _get_turn_cwd() or os.getenv("TERMINAL_CWD") or None
             context_files_prompt = build_context_files_prompt(
                 cwd=_context_cwd, skip_soul=_soul_loaded)
             if context_files_prompt:

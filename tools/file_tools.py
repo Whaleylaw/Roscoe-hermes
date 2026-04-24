@@ -115,8 +115,11 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path:
     """Resolve *filepath* against the task's live terminal cwd when possible."""
     p = Path(filepath).expanduser()
     if not p.is_absolute():
-        base = _get_live_tracking_cwd(task_id) or os.environ.get(
-            "TERMINAL_CWD", os.getcwd()
+        from agent.turn_context import get_turn_cwd
+        base = (
+            _get_live_tracking_cwd(task_id)
+            or get_turn_cwd()
+            or os.environ.get("TERMINAL_CWD", os.getcwd())
         )
         p = Path(base) / p
     return p.resolve()

@@ -1247,9 +1247,12 @@ class SlackAdapter(BasePlatformAdapter):
             thread_id=thread_ts,
         )
 
-        # Per-channel ephemeral prompt
-        from gateway.platforms.base import resolve_channel_prompt
+        # Per-channel ephemeral prompt and working-directory override
+        from gateway.platforms.base import resolve_channel_prompt, resolve_channel_cwd
         _channel_prompt = resolve_channel_prompt(
+            self.config.extra, channel_id, None,
+        )
+        _channel_cwd = resolve_channel_cwd(
             self.config.extra, channel_id, None,
         )
 
@@ -1263,6 +1266,7 @@ class SlackAdapter(BasePlatformAdapter):
             media_types=media_types,
             reply_to_message_id=thread_ts if thread_ts != ts else None,
             channel_prompt=_channel_prompt,
+            channel_cwd=_channel_cwd,
         )
 
         # Only react when bot is directly addressed (DM or @mention).
