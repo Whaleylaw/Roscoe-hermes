@@ -227,3 +227,58 @@ class TestAppendToSqlite:
             _append_to_sqlite("sess_1", {"role": "assistant", "content": "hello"})
 
         mock_db.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# New tests for public find_session_id and mirror_inbound_to_session
+# ---------------------------------------------------------------------------
+
+from gateway.mirror import (  # noqa: E402  (appended after existing imports)
+    find_session_id,
+    mirror_inbound_to_session,
+)
+
+
+def _write_sessions_index_for_target(tmp_path, entries):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    (sessions_dir / "sessions.json").write_text(json.dumps(entries))
+    return sessions_dir
+
+
+class TestFindSessionIdPublic:
+    def test_matches_chat_id(self, tmp_path):
+        _write_sessions_index_for_target(tmp_path, {
+            "k": {
+                "session_id": "sess-abby",
+                "origin": {"platform": "slack", "chat_id": "C0AH0V6G2Q1"},
+                "updated_at": "2026-04-25T00:00:00",
+            },
+        })
+        with patch("gateway.mirror._SESSIONS_INDEX", tmp_path / "sessions" / "sessions.json"):
+            assert find_session_id("slack", "C0AH0V6G2Q1") == "sess-abby"
+
+    def test_returns_none_when_missing(self, tmp_path):
+        _write_sessions_index_for_target(tmp_path, {})
+        with patch("gateway.mirror._SESSIONS_INDEX", tmp_path / "sessions" / "sessions.json"):
+            assert find_session_id("slack", "C-nope") is None
+
+
+class TestMirrorInboundToSession:
+    def test_writes_user_role_to_jsonl(self, tmp_path):
+        sessions_dir = _write_sessions_index_for_target(tmp_path, {})
+        with patch("gateway.mirror._SESSIONS_DIR", sessions_dir), \
+             patch("gateway.mirror._append_to_sqlite") as fake_sql:
+            ok = mirror_inbound_to_session(
+                session_id="sess-abby",
+                request_text="Draft a complaint for the Smith case.",
+                source_label="perry-delegate",
+            )
+        assert ok is True
+        line = (sessions_dir / "sess-abby.jsonl").read_text().splitlines()[0]
+        record = json.loads(line)
+        assert record["role"] == "user"
+        assert record["mirror"] is True
+        assert record["mirror_source"] == "perry-delegate"
+        assert "Smith" in record["content"]
+        fake_sql.assert_called_once()
