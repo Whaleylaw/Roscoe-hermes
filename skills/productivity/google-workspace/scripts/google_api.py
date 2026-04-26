@@ -550,6 +550,140 @@ def gmail_draft_send(args):
     }, indent=2))
 
 
+def gmail_draft_update(args):
+    """Replace the contents of an existing draft. Mirrors `gmail draft` flags."""
+    message = MIMEText(args.body, "html" if args.html else "plain")
+    message["to"] = args.to
+    message["subject"] = args.subject
+    if args.cc:
+        message["cc"] = args.cc
+    if args.from_header:
+        message["from"] = args.from_header
+
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    msg_payload: dict = {"raw": raw}
+    if args.thread_id:
+        msg_payload["threadId"] = args.thread_id
+
+    if _gws_binary():
+        result = _run_gws(
+            ["gmail", "users", "drafts", "update"],
+            params={"userId": "me", "id": args.draft_id},
+            body={"message": msg_payload},
+        )
+    else:
+        service = build_service("gmail", "v1")
+        result = service.users().drafts().update(
+            userId="me", id=args.draft_id, body={"message": msg_payload}
+        ).execute()
+    print(json.dumps({
+        "status": "drafted",
+        "id": result.get("id", ""),
+        "messageId": (result.get("message") or {}).get("id", ""),
+        "threadId": (result.get("message") or {}).get("threadId", ""),
+    }, indent=2))
+
+
+def gmail_thread_get(args):
+    """Fetch a full thread with every message's headers, labels, and decoded body."""
+    if _gws_binary():
+        thread = _run_gws(
+            ["gmail", "users", "threads", "get"],
+            params={"userId": "me", "id": args.thread_id, "format": "full"},
+        )
+    else:
+        service = build_service("gmail", "v1")
+        thread = service.users().threads().get(
+            userId="me", id=args.thread_id, format="full"
+        ).execute()
+
+    messages = []
+    for msg in thread.get("messages", []):
+        headers = _headers_dict(msg)
+        messages.append({
+            "id": msg["id"],
+            "threadId": msg["threadId"],
+            "from": headers.get("From", ""),
+            "to": headers.get("To", ""),
+            "cc": headers.get("Cc", ""),
+            "subject": headers.get("Subject", ""),
+            "date": headers.get("Date", ""),
+            "labels": msg.get("labelIds", []),
+            "internalDate": msg.get("internalDate", ""),
+            "snippet": msg.get("snippet", ""),
+            "body": _extract_message_body(msg),
+        })
+    print(json.dumps({
+        "id": thread.get("id", args.thread_id),
+        "historyId": thread.get("historyId", ""),
+        "messages": messages,
+    }, indent=2, ensure_ascii=False))
+
+
+def gmail_attachments_list(args):
+    """List attachments on a message: filename, mimeType, size, attachmentId."""
+    if _gws_binary():
+        msg = _run_gws(
+            ["gmail", "users", "messages", "get"],
+            params={"userId": "me", "id": args.message_id, "format": "full"},
+        )
+    else:
+        service = build_service("gmail", "v1")
+        msg = service.users().messages().get(
+            userId="me", id=args.message_id, format="full"
+        ).execute()
+
+    attachments = []
+    def _walk(part):
+        body = part.get("body", {}) or {}
+        filename = part.get("filename") or ""
+        if filename and body.get("attachmentId"):
+            attachments.append({
+                "filename": filename,
+                "mimeType": part.get("mimeType", ""),
+                "size": body.get("size", 0),
+                "attachmentId": body["attachmentId"],
+                "partId": part.get("partId", ""),
+            })
+        for child in part.get("parts", []) or []:
+            _walk(child)
+
+    _walk(msg.get("payload", {}))
+    print(json.dumps(attachments, indent=2, ensure_ascii=False))
+
+
+def gmail_attachment_download(args):
+    """Download a single attachment by attachmentId to a file on disk."""
+    if _gws_binary():
+        att = _run_gws(
+            ["gmail", "users", "messages", "attachments", "get"],
+            params={
+                "userId": "me",
+                "messageId": args.message_id,
+                "id": args.attachment_id,
+            },
+        )
+    else:
+        service = build_service("gmail", "v1")
+        att = service.users().messages().attachments().get(
+            userId="me", messageId=args.message_id, id=args.attachment_id
+        ).execute()
+
+    data = att.get("data", "")
+    if not data:
+        print(json.dumps({"error": "Attachment had no data field"}), file=sys.stderr)
+        sys.exit(1)
+    raw = base64.urlsafe_b64decode(data)
+    out_path = Path(args.output).expanduser()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(raw)
+    print(json.dumps({
+        "status": "downloaded",
+        "path": str(out_path),
+        "bytes": len(raw),
+    }, indent=2))
+
+
 def gmail_labels(args):
     if _gws_binary():
         results = _run_gws(["gmail", "users", "labels", "list"], params={"userId": "me"})
@@ -918,6 +1052,32 @@ def main():
     p = gmail_sub.add_parser("draft-send", help="Send a previously-created draft")
     p.add_argument("draft_id", help="Draft ID returned by `gmail draft`")
     p.set_defaults(func=gmail_draft_send)
+
+    p = gmail_sub.add_parser("draft-update", help="Replace the contents of an existing draft")
+    p.add_argument("draft_id", help="Draft ID to revise")
+    p.add_argument("--to", required=True)
+    p.add_argument("--subject", required=True)
+    p.add_argument("--body", required=True)
+    p.add_argument("--cc", default="")
+    p.add_argument("--from", dest="from_header", default="", help="Custom From header")
+    p.add_argument("--html", action="store_true", help="Body is HTML")
+    p.add_argument("--thread-id", default="", help="Thread ID for threading")
+    p.set_defaults(func=gmail_draft_update)
+
+    p = gmail_sub.add_parser("thread-get", help="Fetch a full Gmail thread with every message decoded")
+    p.add_argument("thread_id", help="Thread ID")
+    p.set_defaults(func=gmail_thread_get)
+
+    p = gmail_sub.add_parser("attachments", help="List attachments on a message")
+    p.add_argument("message_id", help="Message ID")
+    p.set_defaults(func=gmail_attachments_list)
+
+    p = gmail_sub.add_parser("attachment-download", help="Download a single attachment to disk")
+    p.add_argument("message_id", help="Message ID containing the attachment")
+    p.add_argument("--attachment-id", required=True, dest="attachment_id",
+                   help="attachmentId returned by `gmail attachments`")
+    p.add_argument("-o", "--output", required=True, help="Output file path")
+    p.set_defaults(func=gmail_attachment_download)
 
     p = gmail_sub.add_parser("labels")
     p.set_defaults(func=gmail_labels)
