@@ -198,6 +198,50 @@ Current aliases:
 - `jerome-hedinger-premise → C0AGN32BL9Y` (#jerome-hedinger) — his two
   matters consolidated into one.
 
+### Cross-session delegation
+
+Perry can be asked from `#perry`, a DM, Telegram, or the web app to "go
+work the Smith case and post an update to `#smith`". The straightforward
+path — have Perry just call `send_message` — works, but the upstream tool
+calls and reasoning end up in Perry's unified-timeline session, not in the
+case session that owns the work.
+
+`delegate_task` accepts a `session_target` argument that routes a child
+agent's whole transcript into a *named* gateway session:
+
+```
+delegate_task(
+    goal="Review the latest medical records and draft a demand letter.",
+    toolsets=["file_ops", "messaging"],
+    session_target="case:smith",   # or "slack:#smith" or "slack:C0…"
+)
+```
+
+What that does:
+
+- Resolves the existing gateway `session_id` for `#smith` (channel must
+  have been messaged at least once so the gateway has recorded its origin).
+- Sets the child's `cwd` to the case folder via `turn_cwd_var`, so
+  `AGENTS.md`, terminal, and file tools are scoped to the case.
+- Records a `(via slack) <goal>` user-role breadcrumb in `#smith`'s
+  transcript so the case session shows where the request came from.
+- Preserves `parent_session_id = <Perry's session>` so the audit chain
+  still shows Perry initiated the work.
+
+Spec forms:
+
+- `slack:<channel_id>` — e.g. `slack:C0AH0V6G2Q1`
+- `slack:#<channel_name>` — resolved via `case_channels.yaml`
+- `case:<slug>` — Paralegal-only convenience form
+
+If the target channel has never received a message (no gateway session
+exists yet), the resolver raises `SessionTargetError`; send any message
+in the channel first.
+
+Implemented in `gateway/cross_session.py` (resolver), `gateway/mirror.py`
+(`find_session_id`, `mirror_inbound_to_session`), and
+`tools/delegate_tool.py` (plumbing + `turn_cwd_var` wrap).
+
 ### Bulk-invite bot to case channels
 
 `~/.hermes/profiles/paralegal/invite_bot_to_cases.py` uses the Paralegal
