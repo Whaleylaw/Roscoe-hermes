@@ -158,6 +158,46 @@ Should print `AUTHENTICATED`. Setup is complete — token refreshes automaticall
 - If `gws` is installed, `google_api.py` points it at the same `~/.hermes/google_token.json` credentials file. Users do not need to run a separate `gws auth login` flow.
 - To revoke: `$GSETUP --revoke`
 
+### Alternative: Service Account + Domain-Wide Delegation (headless / agent use)
+
+For Workspace domains where you control admin, you can skip user-OAuth entirely
+and run with a service account that impersonates a user via Domain-Wide
+Delegation. No browser flow, no consent screen, no token to refresh.
+
+Requires a Workspace super-admin. When an SA key is configured the skill uses
+the native Python google-auth library directly (the `gws` CLI does not
+currently support DWD impersonation —
+[googleworkspace/cli#632](https://github.com/googleworkspace/cli/issues/632)).
+Other gws-only features (helper commands, broader discovery surface) remain
+available from your shell using separate user-OAuth credentials.
+
+1. Create a service account in your GCP project and download a JSON key.
+2. In Workspace Admin Console → Security → Access and data control → API
+   controls → Domain-wide Delegation, add the SA's client ID. Use **exactly**
+   these scopes (DWD requires exact-string match — broader scopes don't
+   imply narrower ones):
+   - `https://www.googleapis.com/auth/gmail.modify`
+   - `https://www.googleapis.com/auth/gmail.compose`
+   - `https://www.googleapis.com/auth/gmail.send`
+   - `https://www.googleapis.com/auth/calendar`
+   - `https://www.googleapis.com/auth/drive`
+   - `https://www.googleapis.com/auth/contacts.readonly`
+   - `https://www.googleapis.com/auth/spreadsheets`
+   - `https://www.googleapis.com/auth/documents`
+3. Add a top-level `"subject": "you@yourdomain.com"` field to the JSON key file
+   so the skill knows which user to impersonate. (Override at runtime with
+   `HERMES_GOOGLE_IMPERSONATE=user@yourdomain.com` if needed.)
+4. Save the JSON to `~/.hermes/auth/gws-sa.json` with `chmod 600` (or set
+   `HERMES_GOOGLE_SA_KEY_FILE=/abs/path/to/key.json`).
+5. On the GCP project's IAM page, grant the impersonated user the
+   **Service Usage Consumer** role (Owner is sufficient if they're already a
+   project owner) so they can consume API quota on the SA's project.
+
+When that file is present, `google_api.py` skips `gws` entirely and uses
+`google.oauth2.service_account.Credentials.with_subject(...)` directly. The
+SA mints fresh JWT-backed access tokens on every call — no refresh-token
+expiry. Audit logs still attribute calls to the impersonated user.
+
 ## Usage
 
 All commands go through the API script. Set `GAPI` as a shorthand:
@@ -185,6 +225,14 @@ $GAPI gmail send --to user@example.com --subject "Hello" --from '"Research Agent
 # Reply (automatically threads and sets In-Reply-To)
 $GAPI gmail reply MESSAGE_ID --body "Thanks, that works for me."
 $GAPI gmail reply MESSAGE_ID --from '"Support Bot" <user@example.com>' --body "Thanks"
+
+# Draft — same flags as `send`, but stored under Drafts instead of sending.
+# Returns {status: "drafted", id: DRAFT_ID, messageId, threadId}.
+$GAPI gmail draft --to user@example.com --subject "Hello" --body "Message text"
+$GAPI gmail draft --to user@example.com --subject "Reply re X" --body "..." --thread-id THREAD_ID
+
+# Send a previously-created draft by its draft id
+$GAPI gmail draft-send DRAFT_ID
 
 # Labels
 $GAPI gmail labels
@@ -246,7 +294,8 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 - **Gmail search**: `[{id, threadId, from, to, subject, date, snippet, labels}]`
 - **Gmail get**: `{id, threadId, from, to, subject, date, labels, body}`
-- **Gmail send/reply**: `{status: "sent", id, threadId}`
+- **Gmail send/reply/draft-send**: `{status: "sent", id, threadId}`
+- **Gmail draft**: `{status: "drafted", id, messageId, threadId}`
 - **Calendar list**: `[{id, summary, start, end, location, description, htmlLink}]`
 - **Calendar create**: `{status: "created", id, summary, htmlLink}`
 - **Drive search**: `[{id, name, mimeType, modifiedTime, webViewLink}]`

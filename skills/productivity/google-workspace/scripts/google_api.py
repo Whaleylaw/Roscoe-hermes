@@ -34,16 +34,32 @@ from pathlib import Path
 HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
 TOKEN_PATH = HERMES_HOME / "google_token.json"
 CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
+DEFAULT_SA_KEY_PATH = HERMES_HOME / "auth" / "gws-sa.json"
+
+
+def _service_account_key_path() -> Path | None:
+    """Resolve a Service Account key file for Domain-Wide Delegation, if any.
+
+    Precedence: HERMES_GOOGLE_SA_KEY_FILE env var, then ~/.hermes/auth/gws-sa.json.
+    Used only with the gws backend; the Python fallback expects user-OAuth tokens.
+    """
+    override = os.getenv("HERMES_GOOGLE_SA_KEY_FILE", "").strip()
+    if override:
+        path = Path(override).expanduser()
+        return path if path.is_file() else None
+    return DEFAULT_SA_KEY_PATH if DEFAULT_SA_KEY_PATH.is_file() else None
 
 SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
+    # gmail.modify covers read + modify capabilities; gmail.send is required
+    # separately by some flows; gmail.compose is required for draft creation.
     "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/contacts.readonly",
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/documents.readonly",
+    "https://www.googleapis.com/auth/documents",
 ]
 
 
@@ -55,6 +71,8 @@ def _normalize_authorized_user_payload(payload: dict) -> dict:
 
 
 def _ensure_authenticated():
+    if _service_account_key_path() is not None:
+        return
     if not TOKEN_PATH.exists():
         print("Not authenticated. Run the setup script first:", file=sys.stderr)
         print(f"  python {Path(__file__).parent / 'setup.py'}", file=sys.stderr)
@@ -73,6 +91,12 @@ def _stored_token_scopes() -> list[str]:
 
 
 def _gws_binary() -> str | None:
+    # gws does not support Domain-Wide Delegation impersonation
+    # (googleworkspace/cli#632, #753) — when an SA key is configured we must
+    # bypass gws entirely and use the native Python google-auth path, which
+    # supports `Credentials.with_subject(...)`.
+    if _service_account_key_path() is not None:
+        return None
     override = os.getenv("HERMES_GWS_BIN")
     if override:
         return override
@@ -167,8 +191,44 @@ def _datetime_with_timezone(value: str) -> str:
     return value + "Z"
 
 
+def _resolve_impersonation_subject(sa_key_path: Path) -> str:
+    """Resolve which user the service account should impersonate via DWD.
+
+    Precedence: HERMES_GOOGLE_IMPERSONATE env var, then a `"subject"` field
+    we add to the SA JSON during setup. Failing both, error clearly.
+    """
+    env_override = os.getenv("HERMES_GOOGLE_IMPERSONATE", "").strip()
+    if env_override:
+        return env_override
+    try:
+        data = json.loads(sa_key_path.read_text())
+    except Exception as exc:
+        print(f"Cannot read SA key {sa_key_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    subject = data.get("subject", "").strip()
+    if subject:
+        return subject
+    print(
+        f"Service account at {sa_key_path} has no impersonation subject.\n"
+        "Set HERMES_GOOGLE_IMPERSONATE=user@yourdomain.com or add a top-level\n"
+        '"subject": "user@yourdomain.com" field to the JSON key file.',
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def get_credentials():
-    """Load and refresh credentials from token file."""
+    """Load credentials. Service-account + DWD path takes precedence over user OAuth."""
+    sa_key = _service_account_key_path()
+    if sa_key is not None:
+        from google.oauth2 import service_account
+
+        subject = _resolve_impersonation_subject(sa_key)
+        creds = service_account.Credentials.from_service_account_file(
+            str(sa_key), scopes=SCOPES
+        ).with_subject(subject)
+        return creds
+
     _ensure_authenticated()
 
     from google.oauth2.credentials import Credentials
@@ -408,6 +468,86 @@ def gmail_reply(args):
     result = service.users().messages().send(userId="me", body=body).execute()
     print(json.dumps({"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2))
 
+
+
+def gmail_draft(args):
+    """Create a Gmail draft. Mirrors gmail_send's flag set."""
+    if _gws_binary():
+        message = MIMEText(args.body, "html" if args.html else "plain")
+        message["to"] = args.to
+        message["subject"] = args.subject
+        if args.cc:
+            message["cc"] = args.cc
+        if args.from_header:
+            message["from"] = args.from_header
+
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        msg_payload: dict = {"raw": raw}
+        if args.thread_id:
+            msg_payload["threadId"] = args.thread_id
+
+        result = _run_gws(
+            ["gmail", "users", "drafts", "create"],
+            params={"userId": "me"},
+            body={"message": msg_payload},
+        )
+        print(json.dumps({
+            "status": "drafted",
+            "id": result.get("id", ""),
+            "messageId": (result.get("message") or {}).get("id", ""),
+            "threadId": (result.get("message") or {}).get("threadId", ""),
+        }, indent=2))
+        return
+
+    service = build_service("gmail", "v1")
+    message = MIMEText(args.body, "html" if args.html else "plain")
+    message["to"] = args.to
+    message["subject"] = args.subject
+    if args.cc:
+        message["cc"] = args.cc
+    if args.from_header:
+        message["from"] = args.from_header
+
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    msg_payload = {"raw": raw}
+    if args.thread_id:
+        msg_payload["threadId"] = args.thread_id
+
+    result = service.users().drafts().create(
+        userId="me", body={"message": msg_payload}
+    ).execute()
+    print(json.dumps({
+        "status": "drafted",
+        "id": result.get("id", ""),
+        "messageId": (result.get("message") or {}).get("id", ""),
+        "threadId": (result.get("message") or {}).get("threadId", ""),
+    }, indent=2))
+
+
+def gmail_draft_send(args):
+    """Send a previously-created draft by its draft ID."""
+    if _gws_binary():
+        result = _run_gws(
+            ["gmail", "users", "drafts", "send"],
+            params={"userId": "me"},
+            body={"id": args.draft_id},
+        )
+        print(json.dumps({
+            "status": "sent",
+            "id": result.get("id", ""),
+            "threadId": result.get("threadId", ""),
+        }, indent=2))
+        return
+
+    service = build_service("gmail", "v1")
+    result = service.users().drafts().send(
+        userId="me", body={"id": args.draft_id}
+    ).execute()
+    print(json.dumps({
+        "status": "sent",
+        "id": result.get("id", ""),
+        "threadId": result.get("threadId", ""),
+    }, indent=2))
 
 
 def gmail_labels(args):
@@ -764,6 +904,20 @@ def main():
     p.add_argument("--body", required=True)
     p.add_argument("--from", dest="from_header", default="", help="Custom From header (e.g. '\"Agent Name\" <user@example.com>')")
     p.set_defaults(func=gmail_reply)
+
+    p = gmail_sub.add_parser("draft", help="Create a Gmail draft")
+    p.add_argument("--to", required=True)
+    p.add_argument("--subject", required=True)
+    p.add_argument("--body", required=True)
+    p.add_argument("--cc", default="")
+    p.add_argument("--from", dest="from_header", default="", help="Custom From header")
+    p.add_argument("--html", action="store_true", help="Body is HTML")
+    p.add_argument("--thread-id", default="", help="Thread ID for threading")
+    p.set_defaults(func=gmail_draft)
+
+    p = gmail_sub.add_parser("draft-send", help="Send a previously-created draft")
+    p.add_argument("draft_id", help="Draft ID returned by `gmail draft`")
+    p.set_defaults(func=gmail_draft_send)
 
     p = gmail_sub.add_parser("labels")
     p.set_defaults(func=gmail_labels)
