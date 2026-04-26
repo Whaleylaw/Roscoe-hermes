@@ -638,9 +638,19 @@ def load_gateway_config() -> GatewayConfig:
             for plat in Platform:
                 if plat == Platform.LOCAL:
                     continue
-                platform_cfg = yaml_cfg.get(plat.value)
-                if not isinstance(platform_cfg, dict):
+                # Accept platform settings either at top-level (legacy) or
+                # under platforms.<name> (preferred).  Nested form is the
+                # documented path; merge both so either works.
+                top_level = yaml_cfg.get(plat.value) if isinstance(yaml_cfg.get(plat.value), dict) else {}
+                nested = {}
+                _nested_platforms = yaml_cfg.get("platforms")
+                if isinstance(_nested_platforms, dict):
+                    _pblock = _nested_platforms.get(plat.value)
+                    if isinstance(_pblock, dict):
+                        nested = _pblock
+                if not top_level and not nested:
                     continue
+                platform_cfg = {**nested, **top_level}  # top-level wins on conflict
                 # Collect bridgeable keys from this platform section
                 bridged = {}
                 if "unauthorized_dm_behavior" in platform_cfg:
@@ -672,6 +682,40 @@ def load_gateway_config() -> GatewayConfig:
                         bridged["channel_prompts"] = {str(k): v for k, v in channel_prompts.items()}
                     else:
                         bridged["channel_prompts"] = channel_prompts
+                if "channel_cwds" in platform_cfg:
+                    cwds = platform_cfg["channel_cwds"]
+                    if isinstance(cwds, dict):
+                        bridged["channel_cwds"] = {str(k): str(v) for k, v in cwds.items()}
+                if "channel_cwds_file" in platform_cfg:
+                    # Load channel_id -> path mapping from an external YAML
+                    # file.  Expects a top-level ``channel_to_cwd`` key whose
+                    # value is a dict {channel_id: path}.  Lets users keep
+                    # the 100+-entry mapping in its own file instead of
+                    # bloating config.yaml.
+                    import yaml as _yaml
+                    _cwds_path = os.path.expanduser(str(platform_cfg["channel_cwds_file"]))
+                    try:
+                        with open(_cwds_path, "r", encoding="utf-8") as _fh:
+                            _cwds_doc = _yaml.safe_load(_fh) or {}
+                        _mapping = _cwds_doc.get("channel_to_cwd") or {}
+                        if isinstance(_mapping, dict):
+                            existing = bridged.get("channel_cwds", {})
+                            if not isinstance(existing, dict):
+                                existing = {}
+                            for _k, _v in _mapping.items():
+                                existing.setdefault(str(_k), str(_v))
+                            bridged["channel_cwds"] = existing
+                        else:
+                            logger.warning(
+                                "channel_cwds_file %s: 'channel_to_cwd' is not a dict; ignoring",
+                                _cwds_path,
+                            )
+                    except FileNotFoundError:
+                        logger.warning("channel_cwds_file not found: %s", _cwds_path)
+                    except Exception as _exc:
+                        logger.warning(
+                            "Failed to load channel_cwds_file %s: %s", _cwds_path, _exc,
+                        )
                 if not bridged:
                     continue
                 plat_data = platforms_data.setdefault(plat.value, {})

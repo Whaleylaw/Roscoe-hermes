@@ -1237,7 +1237,21 @@ class SlackAdapter(BasePlatformAdapter):
         # Resolve user display name (cached after first lookup)
         user_name = await self._resolve_user_name(user_id, chat_id=channel_id)
 
-        # Build source
+        # Per-channel ephemeral prompt and working-directory override.
+        # Resolved before building the source so session_isolated can reflect
+        # whether this channel has a case-scoped cwd override.
+        from gateway.platforms.base import resolve_channel_prompt, resolve_channel_cwd
+        _channel_prompt = resolve_channel_prompt(
+            self.config.extra, channel_id, None,
+        )
+        _channel_cwd = resolve_channel_cwd(
+            self.config.extra, channel_id, None,
+        )
+
+        # Build source.  Channels with a channel_cwd override are isolated
+        # sessions — they don't participate in the profile-wide unified
+        # timeline.  This keeps case conversations (#abby-sitgraves, etc.)
+        # from leaking into the home/DM/Telegram cross-channel view.
         source = self.build_source(
             chat_id=channel_id,
             chat_name=channel_id,  # Will be resolved later if needed
@@ -1246,12 +1260,8 @@ class SlackAdapter(BasePlatformAdapter):
             user_name=user_name,
             thread_id=thread_ts,
         )
-
-        # Per-channel ephemeral prompt
-        from gateway.platforms.base import resolve_channel_prompt
-        _channel_prompt = resolve_channel_prompt(
-            self.config.extra, channel_id, None,
-        )
+        if _channel_cwd:
+            source.session_isolated = True
 
         msg_event = MessageEvent(
             text=text,
@@ -1263,6 +1273,7 @@ class SlackAdapter(BasePlatformAdapter):
             media_types=media_types,
             reply_to_message_id=thread_ts if thread_ts != ts else None,
             channel_prompt=_channel_prompt,
+            channel_cwd=_channel_cwd,
         )
 
         # Only react when bot is directly addressed (DM or @mention).

@@ -31,6 +31,13 @@ from concurrent.futures import (
 )
 from typing import Any, Dict, List, Optional
 
+from agent.turn_context import turn_cwd_var
+from gateway.cross_session import (
+    SessionTarget,
+    SessionTargetError,
+    resolve_session_target,
+)
+from gateway.mirror import mirror_inbound_to_session
 from toolsets import TOOLSETS
 from tools import file_state
 from utils import base_url_hostname, is_truthy_value
@@ -786,6 +793,10 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Optional pre-resolved SessionTarget — when set, the child writes its
+    # transcript into the target's existing gateway session and runs with
+    # the target's case-folder cwd.
+    session_target: Optional["SessionTarget"] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -975,6 +986,7 @@ def _build_child_agent(
         thinking_callback=child_thinking_cb,
         session_db=getattr(parent_agent, "_session_db", None),
         parent_session_id=getattr(parent_agent, "session_id", None),
+        session_id=session_target.session_id if session_target else None,
         providers_allowed=parent_agent.providers_allowed,
         providers_ignored=parent_agent.providers_ignored,
         providers_order=parent_agent.providers_order,
@@ -988,6 +1000,9 @@ def _build_child_agent(
     # Stash the post-degrade role for introspection (leaf if the
     # kill switch or depth bounded the caller's requested role).
     child._delegate_role = effective_role
+    # Stash the session_target so _run_single_child can mirror an inbound
+    # breadcrumb and pin the per-turn cwd via turn_cwd_var.
+    child._session_target = session_target
     # Stash subagent identity for nested-delegation event propagation and
     # for _run_single_child / interrupt_subagent to look up by id.
     child._subagent_id = subagent_id
@@ -1321,12 +1336,38 @@ def _run_single_child(
         # Python stack (see #14726 — 0-API-call hangs are opaque without it).
         _worker_thread_holder: Dict[str, Optional[threading.Thread]] = {"t": None}
 
+        _session_target = getattr(child, "_session_target", None)
+
+        # Mirror the inbound request into the target session so the case
+        # transcript shows where the work came from.
+        if _session_target is not None:
+            try:
+                parent_label = (
+                    getattr(parent_agent, "platform", None)
+                    or getattr(parent_agent, "session_id", None)
+                    or "parent"
+                )
+                mirror_inbound_to_session(
+                    session_id=_session_target.session_id,
+                    request_text=f"(via {parent_label}) {goal}",
+                    source_label=f"delegate-from-{getattr(parent_agent, 'session_id', 'unknown')}",
+                )
+            except Exception as exc:
+                logger.debug("Inbound mirror failed: %s", exc)
+
         def _run_with_thread_capture():
             _worker_thread_holder["t"] = threading.current_thread()
-            return child.run_conversation(
-                user_message=goal,
-                task_id=child_task_id,
-            )
+            _cwd_token = None
+            if _session_target is not None and _session_target.cwd:
+                _cwd_token = turn_cwd_var.set(_session_target.cwd)
+            try:
+                return child.run_conversation(
+                    user_message=goal,
+                    task_id=child_task_id,
+                )
+            finally:
+                if _cwd_token is not None:
+                    turn_cwd_var.reset(_cwd_token)
 
         _child_future = _timeout_executor.submit(_run_with_thread_capture)
         try:
@@ -1703,6 +1744,7 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    session_target: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -1790,7 +1832,13 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {
+                "goal": goal,
+                "context": context,
+                "toolsets": toolsets,
+                "role": top_role,
+                "session_target": session_target,
+            }
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -1827,6 +1875,23 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+
+            # Resolve the per-task session_target spec to a SessionTarget
+            # struct (existing session_id + case-folder cwd). Bad specs land
+            # in results as an error and skip child construction.
+            resolved_target = None
+            spec = t.get("session_target")
+            if spec:
+                try:
+                    resolved_target = resolve_session_target(spec)
+                except SessionTargetError as exc:
+                    results.append({
+                        "task_index": i,
+                        "goal": t.get("goal", ""),
+                        "error": f"session_target unresolved: {exc}",
+                        "status": "error",
+                    })
+                    continue
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
@@ -1849,6 +1914,7 @@ def delegate_task(
                     else (acp_args if acp_args is not None else creds.get("args"))
                 ),
                 role=effective_role,
+                session_target=resolved_target,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -1856,6 +1922,11 @@ def delegate_task(
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
+
+    # All tasks failed to build (e.g. unresolvable session_target) — return
+    # the accumulated error results without entering the run loop.
+    if not children:
+        return json.dumps({"results": results})
 
     if n_tasks == 1:
         # Single task -- run directly (no thread pool overhead)
@@ -2292,6 +2363,17 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "session_target": {
+                            "type": "string",
+                            "description": (
+                                "Optional. Route this delegate's transcript into an existing gateway session "
+                                "instead of a fresh child session. Format: 'slack:<channel_id>', "
+                                "'slack:#<channel_name>', or 'case:<slug>'. The child's working directory "
+                                "and AGENTS.md are also scoped to the case folder when the target maps "
+                                "to one. Use when work kicked off from #perry or a DM should be recorded "
+                                "under a specific case."
+                            ),
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -2334,6 +2416,17 @@ DELEGATE_TASK_SCHEMA = {
                     "Only used when acp_command is set. Example: ['--acp', '--stdio', '--model', 'claude-opus-4-6']"
                 ),
             },
+            "session_target": {
+                "type": "string",
+                "description": (
+                    "Optional. Route this delegate's transcript into an existing gateway session "
+                    "instead of a fresh child session. Format: 'slack:<channel_id>', "
+                    "'slack:#<channel_name>', or 'case:<slug>'. The child's working directory "
+                    "and AGENTS.md are also scoped to the case folder when the target maps "
+                    "to one. Use when work kicked off from #perry or a DM should be recorded "
+                    "under a specific case."
+                ),
+            },
         },
         "required": [],
     },
@@ -2356,6 +2449,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        session_target=args.get("session_target"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,

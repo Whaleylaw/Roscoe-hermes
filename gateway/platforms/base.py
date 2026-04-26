@@ -721,6 +721,12 @@ class MessageEvent:
     # Per-channel ephemeral system prompt (e.g. Discord channel_prompts).
     # Applied at API call time and never persisted to transcript history.
     channel_prompt: Optional[str] = None
+
+    # Per-channel working directory override (Slack channel_cwds).
+    # When set, the agent's tools (terminal, file ops) and AGENTS.md loader
+    # scope to this path for the turn.  Lets one gateway serve many
+    # case-scoped Slack channels without spawning a process per case.
+    channel_cwd: Optional[str] = None
     
     # Internal flag — set for synthetic events (e.g. background process
     # completion notifications) that must bypass user authorization checks.
@@ -876,6 +882,40 @@ def resolve_channel_prompt(
         prompt = str(prompt).strip()
         if prompt:
             return prompt
+    return None
+
+
+def resolve_channel_cwd(
+    config_extra: dict,
+    channel_id: str,
+    parent_id: str | None = None,
+) -> str | None:
+    """Resolve a per-channel working directory override from platform config.
+
+    Looks up ``channel_cwds`` in the adapter's ``config.extra`` dict.
+    Prefers an exact match on *channel_id*; falls back to *parent_id*.
+    Returns the expanded absolute path, or None when no match is found or
+    the resolved path does not exist.
+    """
+    import os
+    from pathlib import Path
+
+    cwds = config_extra.get("channel_cwds") or {}
+    if not isinstance(cwds, dict):
+        return None
+
+    for key in (channel_id, parent_id):
+        if not key:
+            continue
+        raw = cwds.get(key)
+        if raw is None:
+            continue
+        path = str(raw).strip()
+        if not path:
+            continue
+        expanded = os.path.expanduser(path)
+        if Path(expanded).is_dir():
+            return expanded
     return None
 
 

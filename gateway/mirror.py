@@ -63,7 +63,7 @@ def mirror_to_session(
         return False
 
 
-def _find_session_id(platform: str, chat_id: str, thread_id: Optional[str] = None) -> Optional[str]:
+def find_session_id(platform: str, chat_id: str, thread_id: Optional[str] = None) -> Optional[str]:
     """
     Find the active session_id for a platform + chat_id pair.
 
@@ -102,6 +102,38 @@ def _find_session_id(platform: str, chat_id: str, thread_id: Optional[str] = Non
                 best_match = entry.get("session_id")
 
     return best_match
+
+
+# Backward-compat alias — existing callers using the private name still work.
+_find_session_id = find_session_id
+
+
+def mirror_inbound_to_session(
+    session_id: str,
+    request_text: str,
+    source_label: str = "delegate",
+) -> bool:
+    """Append a user-role mirror entry recording why a delegate was started.
+
+    Used when a delegate kicked off in one channel (e.g. #perry) is doing
+    work on behalf of another channel (e.g. #abby-sitgraves).  The receiving
+    case session gets a "user (via Perry) asked: ..." breadcrumb so its
+    transcript explains where the upcoming work came from.
+    """
+    try:
+        mirror_msg = {
+            "role": "user",
+            "content": request_text,
+            "timestamp": datetime.now().isoformat(),
+            "mirror": True,
+            "mirror_source": source_label,
+        }
+        _append_to_jsonl(session_id, mirror_msg)
+        _append_to_sqlite(session_id, mirror_msg)
+        return True
+    except Exception as e:
+        logger.debug("mirror_inbound_to_session failed for %s: %s", session_id, e)
+        return False
 
 
 def _append_to_jsonl(session_id: str, message: dict) -> None:
