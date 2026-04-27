@@ -4138,23 +4138,49 @@ class GatewayRunner:
 
             if image_paths:
                 # Check if the main model supports native vision.
-                # Resolve the runtime provider/model for the capability check.
+                # Read provider/model directly from config.yaml — this is
+                # cheaper and more reliable than _resolve_runtime_agent_kwargs()
+                # which requires full auth resolution.
                 _use_native = False
                 try:
-                    _rt = _resolve_runtime_agent_kwargs()
-                    _rt_provider = _rt.get("provider") or ""
+                    _rt_provider = os.getenv("HERMES_INFERENCE_PROVIDER") or ""
                     _rt_model = os.getenv("HERMES_MODEL") or ""
-                    if not _rt_model:
-                        _cfg_path = _hermes_home / "config.yaml"
-                        if _cfg_path.exists():
-                            import yaml as _nv_yaml
-                            with open(_cfg_path, encoding="utf-8") as _nv_f:
-                                _nv_data = _nv_yaml.safe_load(_nv_f) or {}
-                            _m = _nv_data.get("model", "")
-                            _rt_model = _m if isinstance(_m, str) else (
-                                _m.get("default") or _m.get("model") or ""
-                            ) if isinstance(_m, dict) else ""
+                    _cfg_path = _hermes_home / "config.yaml"
+                    if _cfg_path.exists():
+                        import yaml as _nv_yaml
+                        with open(_cfg_path, encoding="utf-8") as _nv_f:
+                            _nv_data = _nv_yaml.safe_load(_nv_f) or {}
+                        _m = _nv_data.get("model", "")
+                        if isinstance(_m, dict):
+                            if not _rt_model:
+                                _rt_model = _m.get("default") or _m.get("model") or ""
+                            if not _rt_provider or _rt_provider == "auto":
+                                _rt_provider = ""
+                                _raw_prov = _m.get("provider") or ""
+                                if _raw_prov and _raw_prov != "auto":
+                                    _rt_provider = _raw_prov
+                            # Resolve provider from base_url if still unset
+                            if not _rt_provider:
+                                _base = _m.get("base_url") or ""
+                                if "openrouter" in _base:
+                                    _rt_provider = "openrouter"
+                                elif "anthropic" in _base:
+                                    _rt_provider = "anthropic"
+                                elif "openai" in _base:
+                                    _rt_provider = "openai"
+                        elif isinstance(_m, str) and not _rt_model:
+                            _rt_model = _m
+                    # Fall back: infer provider from API key env vars
+                    if not _rt_provider or _rt_provider == "auto":
+                        if os.getenv("OPENROUTER_API_KEY"):
+                            _rt_provider = "openrouter"
+                        elif os.getenv("OPENAI_API_KEY"):
+                            _rt_provider = "openai"
+                        elif os.getenv("ANTHROPIC_API_KEY"):
+                            _rt_provider = "anthropic"
                     _use_native = _should_use_native_vision(_rt_provider, _rt_model)
+                    if _use_native:
+                        logger.info("Native vision enabled for %s/%s", _rt_provider, _rt_model)
                 except Exception as _nv_exc:
                     logger.debug("Native vision check failed, falling back to auxiliary: %s", _nv_exc)
 
