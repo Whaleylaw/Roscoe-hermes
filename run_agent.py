@@ -934,6 +934,18 @@ class AIAgent:
         except Exception:
             pass  # Non-fatal — transport may not exist for all modes yet
 
+        # Cache whether the main model supports native vision so
+        # _preprocess_anthropic_content can decide whether to preserve or
+        # strip image_url parts.
+        self._main_model_supports_vision = False
+        try:
+            from agent.models_dev import get_model_capabilities
+            _caps = get_model_capabilities(self.provider, self.model)
+            if _caps and _caps.supports_vision:
+                self._main_model_supports_vision = True
+        except Exception:
+            pass
+
         try:
             from hermes_cli.model_normalize import (
                 _AGGREGATOR_PROVIDERS,
@@ -6950,6 +6962,12 @@ class AIAgent:
         if not self._content_has_image_parts(content):
             return content
 
+        # When the main model supports vision, let image parts through —
+        # the Anthropic adapter's _convert_content_to_anthropic() will
+        # correctly convert image_url blocks to Anthropic source blocks.
+        if self._main_model_supports_vision:
+            return content
+
         text_parts: List[str] = []
         image_notes: List[str] = []
         for part in content:
@@ -8864,7 +8882,7 @@ class AIAgent:
 
     def run_conversation(
         self,
-        user_message: str,
+        user_message,  # str or List[Dict] (multimodal content parts)
         system_message: str = None,
         conversation_history: List[Dict[str, Any]] = None,
         task_id: str = None,
@@ -8875,7 +8893,9 @@ class AIAgent:
         Run a complete conversation with tool calling until completion.
 
         Args:
-            user_message (str): The user's message/question
+            user_message: The user's message/question.  Can be a plain string
+                or an OpenAI-style content-parts list for multimodal input
+                (e.g. ``[{"type": "image_url", ...}, {"type": "text", ...}]``).
             system_message (str): Custom system message (optional, overrides ephemeral_system_prompt if provided)
             conversation_history (List[Dict]): Previous conversation messages (optional)
             task_id (str): Unique identifier for this task to isolate VMs between concurrent tasks (optional, auto-generated if not provided)
@@ -8909,6 +8929,10 @@ class AIAgent:
         # that are invalid UTF-8 and crash JSON serialization in the OpenAI SDK.
         if isinstance(user_message, str):
             user_message = _sanitize_surrogates(user_message)
+        elif isinstance(user_message, list):
+            for _part in user_message:
+                if isinstance(_part, dict) and _part.get("type") == "text" and isinstance(_part.get("text"), str):
+                    _part["text"] = _sanitize_surrogates(_part["text"])
         if isinstance(persist_user_message, str):
             persist_user_message = _sanitize_surrogates(persist_user_message)
 
@@ -8919,8 +8943,20 @@ class AIAgent:
         # conversation and being visible to the user or the model as user text.
         if isinstance(user_message, str):
             user_message = sanitize_context(user_message)
+        elif isinstance(user_message, list):
+            for _part in user_message:
+                if isinstance(_part, dict) and _part.get("type") == "text" and isinstance(_part.get("text"), str):
+                    _part["text"] = sanitize_context(_part["text"])
         if isinstance(persist_user_message, str):
             persist_user_message = sanitize_context(persist_user_message)
+
+        # Auto-generate persist_user_message for multimodal input so session
+        # transcripts store a readable text version.
+        if persist_user_message is None and isinstance(user_message, list):
+            persist_user_message = " ".join(
+                p.get("text", "") for p in user_message
+                if isinstance(p, dict) and p.get("type") == "text"
+            ).strip() or "[Image(s) attached]"
 
         # Store stream callback for _interruptible_api_call to pick up
         self._stream_callback = stream_callback

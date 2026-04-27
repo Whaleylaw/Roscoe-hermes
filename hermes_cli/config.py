@@ -555,7 +555,11 @@ DEFAULT_CONFIG = {
     # the configured provider is unavailable.
     "auxiliary": {
         "vision": {
-            "provider": "auto",    # auto | openrouter | nous | codex | custom
+            "native": "auto",      # "auto" | true | false — send images directly to the main model
+                                   # auto = check model capabilities at runtime (recommended)
+                                   # true = always send images natively (assumes model supports vision)
+                                   # false = always use auxiliary describe-then-text pipeline
+            "provider": "auto",    # auto | openrouter | nous | codex | custom (for auxiliary fallback)
             "model": "",           # e.g. "google/gemini-2.5-flash", "gpt-4o"
             "base_url": "",        # direct OpenAI-compatible endpoint (takes precedence over provider)
             "api_key": "",         # API key for base_url (falls back to OPENAI_API_KEY)

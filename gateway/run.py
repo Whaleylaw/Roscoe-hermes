@@ -199,6 +199,12 @@ if _config_path.exists():
                     os.environ[_env_map["base_url"]] = _base_url
                 if _api_key:
                     os.environ[_env_map["api_key"]] = _api_key
+            # Bridge auxiliary.vision.native → HERMES_VISION_NATIVE env var.
+            _vision_cfg = _auxiliary_cfg.get("vision", {})
+            if isinstance(_vision_cfg, dict):
+                _native_val = str(_vision_cfg.get("native", "auto")).strip().lower()
+                if _native_val and _native_val != "auto":
+                    os.environ.setdefault("HERMES_VISION_NATIVE", _native_val)
         _agent_cfg = _cfg.get("agent", {})
         if _agent_cfg and isinstance(_agent_cfg, dict):
             if "max_turns" in _agent_cfg:
@@ -349,6 +355,76 @@ logger = logging.getLogger(__name__)
 # session from bypassing the "already running" guard during the async gap
 # between the guard check and actual agent creation.
 _AGENT_PENDING_SENTINEL = object()
+
+
+# ---------------------------------------------------------------------------
+#  Native vision helpers — send images as multimodal content parts when the
+#  main model supports vision, instead of the auxiliary describe-then-text
+#  pipeline.
+# ---------------------------------------------------------------------------
+
+def _should_use_native_vision(provider: str, model: str) -> bool:
+    """Check if the main model should receive images as native content parts.
+
+    Resolution order:
+      1. HERMES_VISION_NATIVE env var (set by config.yaml auxiliary.vision.native)
+      2. ``"auto"`` — query models_dev for the model's vision capability flag.
+    """
+    native_env = os.getenv("HERMES_VISION_NATIVE", "auto").strip().lower()
+    if native_env in ("true", "1", "yes"):
+        return True
+    if native_env in ("false", "0", "no"):
+        return False
+
+    # "auto" — check model capabilities via models.dev metadata
+    try:
+        from agent.models_dev import get_model_capabilities
+        caps = get_model_capabilities(provider or "", model or "")
+        if caps and caps.supports_vision:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _file_to_data_url(file_path: str, max_size_mb: int = 20) -> str:
+    """Convert a local image file to a base64 data URL for multimodal content.
+
+    If the raw image exceeds *max_size_mb* after base64 encoding, it is
+    resized using Pillow (same logic as vision_tools.py) to stay under 5 MB.
+    """
+    import base64
+    import mimetypes
+
+    mime, _ = mimetypes.guess_type(file_path)
+    if not mime or not mime.startswith("image/"):
+        mime = "image/jpeg"
+
+    with open(file_path, "rb") as fh:
+        data = fh.read()
+
+    # Auto-resize oversized images (mirrors tools/vision_tools.py logic)
+    b64 = base64.b64encode(data).decode("ascii")
+    if len(b64) > max_size_mb * 1024 * 1024:
+        try:
+            from PIL import Image
+            import io
+            img = Image.open(io.BytesIO(data))
+            # Resize to fit within ~5 MB base64 budget
+            target_pixels = 2048 * 2048
+            w, h = img.size
+            if w * h > target_pixels:
+                ratio = (target_pixels / (w * h)) ** 0.5
+                img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            data = buf.getvalue()
+            mime = "image/jpeg"
+            b64 = base64.b64encode(data).decode("ascii")
+        except ImportError:
+            pass  # No Pillow — send as-is, let the API handle it
+
+    return f"data:{mime};base64,{b64}"
 
 
 def _resolve_runtime_agent_kwargs() -> dict:
@@ -4027,12 +4103,17 @@ class GatewayRunner:
         event: MessageEvent,
         source: SessionSource,
         history: List[Dict[str, Any]],
-    ) -> Optional[str]:
+    ):
         """Prepare inbound event text for the agent.
 
         Keep the normal inbound path and the queued follow-up path on the same
         preprocessing pipeline so sender attribution, image enrichment, STT,
         document notes, reply context, and @ references all behave the same.
+
+        Returns:
+            ``str`` for plain text messages, ``list`` of OpenAI content parts
+            when native vision is active and the user attached images, or
+            ``None`` to signal "nothing to send".
         """
         history = history or []
         message_text = event.text or ""
@@ -4056,15 +4137,89 @@ class GatewayRunner:
                     audio_paths.append(path)
 
             if image_paths:
-                message_text = await self._enrich_message_with_vision(
-                    message_text,
-                    image_paths,
-                )
+                # Check if the main model supports native vision.
+                # Resolve the runtime provider/model for the capability check.
+                _use_native = False
+                try:
+                    _rt = _resolve_runtime_agent_kwargs()
+                    _rt_provider = _rt.get("provider") or ""
+                    _rt_model = os.getenv("HERMES_MODEL") or ""
+                    if not _rt_model:
+                        _cfg_path = _hermes_home / "config.yaml"
+                        if _cfg_path.exists():
+                            import yaml as _nv_yaml
+                            with open(_cfg_path, encoding="utf-8") as _nv_f:
+                                _nv_data = _nv_yaml.safe_load(_nv_f) or {}
+                            _m = _nv_data.get("model", "")
+                            _rt_model = _m if isinstance(_m, str) else (
+                                _m.get("default") or _m.get("model") or ""
+                            ) if isinstance(_m, dict) else ""
+                    _use_native = _should_use_native_vision(_rt_provider, _rt_model)
+                except Exception as _nv_exc:
+                    logger.debug("Native vision check failed, falling back to auxiliary: %s", _nv_exc)
+
+                if _use_native:
+                    # Build multimodal content parts — images as base64 data URLs
+                    content_parts = []
+                    for img_path in image_paths:
+                        try:
+                            data_url = _file_to_data_url(img_path)
+                            content_parts.append({
+                                "type": "image_url",
+                                "image_url": {"url": data_url, "detail": "auto"},
+                            })
+                        except Exception as _img_exc:
+                            logger.warning("Failed to encode image %s for native vision: %s", img_path, _img_exc)
+                            # Include a text note about the failed image
+                            content_parts.append({
+                                "type": "text",
+                                "text": f"[An image was attached but could not be encoded. "
+                                        f"You can examine it with vision_analyze using image_url: {img_path}]",
+                            })
+                    # Append the local file paths as a hint so the agent can
+                    # still reference images by path for vision_analyze follow-ups.
+                    _path_hints = " ".join(image_paths)
+                    if message_text.strip():
+                        content_parts.append({"type": "text", "text": message_text})
+                    content_parts.append({
+                        "type": "text",
+                        "text": f"[Image file paths for reference: {_path_hints}]",
+                    })
+                    # Replace message_text with the multimodal content list.
+                    # Audio/document enrichment below will still be appended
+                    # as text parts if needed.
+                    message_text = content_parts
+                else:
+                    message_text = await self._enrich_message_with_vision(
+                        message_text,
+                        image_paths,
+                    )
 
             if audio_paths:
-                message_text = await self._enrich_message_with_transcription(
-                    message_text,
-                    audio_paths,
+                # Audio enrichment always produces text; when message_text is
+                # already a multimodal list (native vision), extract the text
+                # portion, enrich it, and append the result as a text part.
+                if isinstance(message_text, list):
+                    _audio_text = " ".join(
+                        p.get("text", "") for p in message_text
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                    _audio_enriched = await self._enrich_message_with_transcription(
+                        _audio_text, audio_paths,
+                    )
+                    if _audio_enriched != _audio_text:
+                        message_text.append({"type": "text", "text": _audio_enriched})
+                else:
+                    message_text = await self._enrich_message_with_transcription(
+                        message_text,
+                        audio_paths,
+                    )
+                # Check for STT failures in the text content
+                _stt_check_text = (
+                    " ".join(
+                        p.get("text", "") for p in message_text
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    ) if isinstance(message_text, list) else message_text
                 )
                 _stt_fail_markers = (
                     "No STT provider",
@@ -4072,7 +4227,7 @@ class GatewayRunner:
                     "can't listen",
                     "VOICE_TOOLS_OPENAI_KEY",
                 )
-                if any(marker in message_text for marker in _stt_fail_markers):
+                if any(marker in _stt_check_text for marker in _stt_fail_markers):
                     _stt_adapter = self.adapters.get(source.platform)
                     _stt_meta = {"thread_id": source.thread_id} if source.thread_id else None
                     if _stt_adapter:
@@ -4129,7 +4284,10 @@ class GatewayRunner:
                         f"The file is saved at: {path}. "
                         f"Ask the user what they'd like you to do with it.]"
                     )
-                message_text = f"{context_note}\n\n{message_text}"
+                if isinstance(message_text, list):
+                    message_text.insert(0, {"type": "text", "text": context_note})
+                else:
+                    message_text = f"{context_note}\n\n{message_text}"
 
         if getattr(event, "reply_to_text", None) and event.reply_to_message_id:
             # Always inject the reply-to pointer — even when the quoted text
@@ -4139,9 +4297,20 @@ class GatewayRunner:
             # multiple times, and without an explicit pointer the agent has to
             # guess (or answer for both subjects). Token overhead is minimal.
             reply_snippet = event.reply_to_text[:500]
-            message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
+            _reply_note = f'[Replying to: "{reply_snippet}"]'
+            if isinstance(message_text, list):
+                message_text.insert(0, {"type": "text", "text": _reply_note})
+            else:
+                message_text = f'{_reply_note}\n\n{message_text}'
 
-        if "@" in message_text:
+        # Extract text for @ reference check — works for both str and list
+        _at_check_text = (
+            " ".join(
+                p.get("text", "") for p in message_text
+                if isinstance(p, dict) and p.get("type") == "text"
+            ) if isinstance(message_text, list) else message_text
+        )
+        if "@" in _at_check_text:
             try:
                 from agent.context_references import preprocess_context_references_async
                 from agent.model_metadata import get_model_context_length
@@ -4153,8 +4322,11 @@ class GatewayRunner:
                     base_url=self._base_url or _msg_runtime.get("base_url") or "",
                     api_key=_msg_runtime.get("api_key") or "",
                 )
+                # @ expansion only works on strings — for multimodal lists,
+                # expand the concatenated text and append the result.
+                _at_input = _at_check_text if isinstance(message_text, list) else message_text
                 _ctx_result = await preprocess_context_references_async(
-                    message_text,
+                    _at_input,
                     cwd=_msg_cwd,
                     context_length=_msg_ctx_len,
                     allowed_root=_msg_cwd,
@@ -4168,7 +4340,10 @@ class GatewayRunner:
                         )
                     return None
                 if _ctx_result.expanded:
-                    message_text = _ctx_result.message
+                    if isinstance(message_text, list):
+                        message_text.append({"type": "text", "text": _ctx_result.message})
+                    else:
+                        message_text = _ctx_result.message
             except Exception as exc:
                 logger.debug("@ context reference expansion failed: %s", exc)
 
@@ -4689,7 +4864,12 @@ class GatewayRunner:
                 "platform": source.platform.value if source.platform else "",
                 "user_id": source.user_id,
                 "session_id": session_entry.session_id,
-                "message": message_text[:500],
+                "message": (
+                    " ".join(
+                        p.get("text", "") for p in message_text
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )[:500] if isinstance(message_text, list) else message_text[:500]
+                ),
             }
             await self.hooks.emit("agent:start", hook_ctx)
 
@@ -9485,7 +9665,7 @@ class GatewayRunner:
 
     async def _run_agent(
         self,
-        message: str,
+        message,  # str or list[dict] (multimodal content parts)
         context_prompt: str,
         history: List[Dict[str, Any]],
         source: SessionSource,
@@ -10284,7 +10464,10 @@ class GatewayRunner:
             _pending_notes = getattr(self, '_pending_model_notes', {})
             _msn = _pending_notes.pop(session_key, None) if session_key else None
             if _msn:
-                message = _msn + "\n\n" + message
+                if isinstance(message, list):
+                    message.insert(0, {"type": "text", "text": _msn})
+                else:
+                    message = _msn + "\n\n" + message
 
             # Auto-continue: if the loaded history ends with a tool result,
             # the previous agent turn was interrupted mid-work (gateway
@@ -10316,23 +10499,29 @@ class GatewayRunner:
                     if _reason == "shutdown_timeout"
                     else "a gateway interruption"
                 )
-                message = (
+                _resume_note = (
                     f"[System note: Your previous turn in this session was interrupted "
                     f"by {_reason_phrase}. The conversation history below is intact. "
                     f"If it contains unfinished tool result(s), process them first and "
                     f"summarize what was accomplished, then address the user's new "
-                    f"message below.]\n\n"
-                    + message
+                    f"message below.]"
                 )
+                if isinstance(message, list):
+                    message.insert(0, {"type": "text", "text": _resume_note})
+                else:
+                    message = _resume_note + "\n\n" + message
             elif agent_history and agent_history[-1].get("role") == "tool":
-                message = (
+                _tool_resume_note = (
                     "[System note: Your previous turn was interrupted before you could "
                     "process the last tool result(s). The conversation history contains "
                     "tool outputs you haven't responded to yet. Please finish processing "
                     "those results and summarize what was accomplished, then address the "
-                    "user's new message below.]\n\n"
-                    + message
+                    "user's new message below.]"
                 )
+                if isinstance(message, list):
+                    message.insert(0, {"type": "text", "text": _tool_resume_note})
+                else:
+                    message = _tool_resume_note + "\n\n" + message
 
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)

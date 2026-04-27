@@ -630,6 +630,14 @@ def load_cli_config() -> Dict[str, Any]:
             os.environ[env_map["base_url"]] = base_url
         if api_key:
             os.environ[env_map["api_key"]] = api_key
+
+    # Bridge auxiliary.vision.native → HERMES_VISION_NATIVE env var
+    # so gateway/run.py can read it without config access.
+    _vision_native = str(
+        auxiliary_config.get("vision", {}).get("native", "auto")
+    ).strip().lower()
+    if _vision_native and _vision_native != "auto":
+        os.environ["HERMES_VISION_NATIVE"] = _vision_native
     
     # Security settings
     security_config = defaults.get("security", {})
