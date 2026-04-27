@@ -4137,6 +4137,7 @@ class GatewayRunner:
                     audio_paths.append(path)
 
             if image_paths:
+                logger.info("Native vision check: %d image(s) detected, checking model capabilities...", len(image_paths))
                 # Check if the main model supports native vision.
                 # Read provider/model directly from config.yaml — this is
                 # cheaper and more reliable than _resolve_runtime_agent_kwargs()
@@ -4178,7 +4179,9 @@ class GatewayRunner:
                             _rt_provider = "openai"
                         elif os.getenv("ANTHROPIC_API_KEY"):
                             _rt_provider = "anthropic"
+                    logger.info("Native vision resolve: provider=%s model=%s", _rt_provider, _rt_model)
                     _use_native = _should_use_native_vision(_rt_provider, _rt_model)
+                    logger.info("Native vision result: _use_native=%s", _use_native)
                     if _use_native:
                         logger.info("Native vision enabled for %s/%s", _rt_provider, _rt_model)
                 except Exception as _nv_exc:
