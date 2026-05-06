@@ -20,6 +20,7 @@ from typing import Dict, Optional
 from hermes_state import SessionDB
 from hermes_cli.profiles import get_active_profile_name
 
+from gateway.conversational_memory import emit_unified_timeline_row
 from gateway.session import SessionSource
 
 
@@ -83,6 +84,18 @@ class UnifiedTimeline:
                 message_id=message_id,
                 ts=ts,
             )
+        emit_unified_timeline_row(
+            profile_id=self.profile_id,
+            seq=seq,
+            ts=ts,
+            direction="inbound",
+            platform=source.platform.value,
+            source_chat_id=source.chat_id,
+            source_thread_id=source.thread_id,
+            author=source.user_name or source.user_id,
+            content=content,
+            message_id=message_id,
+        )
         return TurnHandle(
             profile_id=self.profile_id,
             platform=source.platform.value,
@@ -101,7 +114,7 @@ class UnifiedTimeline:
         """Append an outbound message tied to an inbound turn handle."""
         ts = ts if ts is not None else time.time()
         with self._lock:
-            return self.db.append_timeline_message(
+            seq = self.db.append_timeline_message(
                 profile_id=turn.profile_id,
                 direction="outbound",
                 platform=turn.platform,
@@ -112,3 +125,16 @@ class UnifiedTimeline:
                 message_id=message_id,
                 ts=ts,
             )
+        emit_unified_timeline_row(
+            profile_id=turn.profile_id,
+            seq=seq,
+            ts=ts,
+            direction="outbound",
+            platform=turn.platform,
+            source_chat_id=turn.source_chat_id,
+            source_thread_id=turn.source_thread_id,
+            author="agent",
+            content=content,
+            message_id=message_id,
+        )
+        return seq
