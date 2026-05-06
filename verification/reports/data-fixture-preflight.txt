@@ -1,0 +1,41 @@
+# Data/Fixture Preflight Report
+Generated: 2026-04-26T15:05 UTC
+Roscoe Platform (project_id=8) — Task #3
+
+## PRESENT (PASS)
+
+### Core Test Infrastructure
+- `tests/conftest.py` — Hermetic pytest fixtures: tmp_dir, mock_config, autouse credential scrubbing, 30s timeout, event-loop normalization
+- `tests/fakes/fake_ha_server.py` — In-process fake Home Assistant server (no external dependencies)
+- `scripts/run_tests.sh` — Canonical runner (venv activation, TZ=UTC, LANG=C.UTF-8, PYTHONHASHSEED=0, -n 4)
+- `.venv/` — Virtualenv present and functional (Python 3.12.7)
+
+### Runtime-Generated Test Data
+- `tests/integration/test_batch_runner.py`: Creates `tests/test_dataset.jsonl` at runtime
+- `tests/integration/test_checkpoint_resumption.py`: Creates `tests/test_data/checkpoint_test_dataset.jsonl` at runtime
+- `datagen-config-examples/`: Example config files for batch data generation (not required for tests)
+
+### Fixture Pattern
+All test fixtures are either:
+a) Injected via conftest.py (no external files required)
+b) Generated at test startup in tempfiles or tests/test_data/
+c) Mock objects (no credentials or accounts needed)
+
+## MISSING / GAPS (FAIL)
+
+| Item | Path | Impact |
+|------|------|--------|
+| Workspace UI smoke lane | `ws-tests/sanity/` | Lane 2 cannot run |
+| API smoke lane | `ws-tests/api-tests/` | Lane 3 cannot run |
+| UI sanity lane | `tests/sanity/` | Lane 1 cannot run (pnpm test) |
+| Fixture verification script | `scripts/verify_data_fixtures.py` | Referenced in matrix but absent |
+
+## Verdict
+
+**Core pytest suite: READY** — All hermetic unit/integration tests are self-contained with no missing fixtures.
+
+**Smoke lanes: BLOCKED** — `ws-tests/` and `tests/sanity/` directories do not exist. These are gaps from the Roscoe conversion scope, not fixture problems. Downstream tasks (Run Smoke Lane 2 & 3) will fail unless these are created first.
+
+## Recommendation
+1. Smoke Lane tasks (#5, #6) should be pre-triaged: if ws-tests/ is in-scope to be created, add a setup task. If lanes reference a different repo, document the correct path.
+2. Core Python test suite can proceed with: `scripts/run_tests.sh tests/` (excludes ws-tests smoke lanes).

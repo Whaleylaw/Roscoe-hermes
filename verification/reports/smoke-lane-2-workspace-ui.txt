@@ -1,0 +1,36 @@
+# Smoke Lane 2 Report: ws-tests/sanity (Workspace UI)
+Generated: 2026-04-26T15:32 UTC
+Roscoe Platform (project_id=8) — Task #5 (MC id=119)
+
+## STATUS: BLOCKED — AWAITING OWNER INPUT
+
+## Attempted Command
+```
+cd ws-tests/sanity && pnpm test
+```
+
+## Result
+BLOCKED — `ws-tests/sanity/` directory does not exist in roscoe-hermes repo.
+
+## Evidence
+- `ws-tests/` root directory: **ABSENT** (`os.path.exists()` returned False)
+- Data/Fixture Preflight (task #3, completed 2026-04-26) independently confirmed this gap
+- Infra preflight (task #2): pnpm v10.2.1 is available, no blocker from toolchain
+
+## Core Python Sanity Check (Proxy Evidence)
+As a proxy check to confirm the Python test environment is functional:
+- Ran: `pytest tests/test_hermes_constants.py tests/test_utils_truthy_values.py tests/test_packaging_metadata.py tests/test_retry_utils.py`
+- Result: **26 passed** in 1.38s (exit code 0)
+- Python environment (.venv, pytest-xdist) is healthy
+
+## Blocker
+Creating `ws-tests/sanity/` requires owner decision on scope and content — this is a code-creation action, not a verification-runner action. Per runbook rule 4, Hermes cannot execute this unilaterally.
+
+## Owner Decision Required
+Choose one:
+- **A)** Create `ws-tests/sanity/` with workspace UI test specs as part of Roscoe conversion scope → assign task back to Hermes after setup task is done
+- **B)** Remove Smoke Lane 2 from verification matrix as out-of-scope → update VERIFICATION_MATRIX.md and mark task cancelled
+- **C)** Point to alternate test path (different directory or repo) → provide path and resume
+
+## Recommendation
+Option B or C are lowest-risk resolutions if Roscoe-hermes is not a workspace UI product. The core Python suite (tests/) is healthy and verifiable.

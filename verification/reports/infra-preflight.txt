@@ -1,0 +1,38 @@
+# Infra Preflight (2026-04-26 — Post Fix Batch A)
+
+## Fix Applied
+- `ss` command not found (macOS) → replaced with `lsof` in `scripts/verify_preflight.py`
+- `verify_preflight.py` created at `scripts/verify_preflight.py` (was missing)
+- `verify_data_fixtures.py` created at `scripts/verify_data_fixtures.py` (was missing)
+
+## Verified Run — scripts/verify_preflight.py exit=0
+```
+[PASS] python3: Python 3.12.7
+[PASS] node: v24.7.0
+[PASS] npm: 11.5.1
+[PASS] pnpm: 10.2.1
+[PASS] git: git version 2.50.1 (Apple Git-155)
+[PASS] docker: Docker version 29.2.0, build 0b9d198
+
+## Port check
+[PASS] lsof: 33 listening ports found (macOS)
+
+RESULT: PASS — all infra checks passed
+```
+
+## Verified Run — scripts/verify_data_fixtures.py exit=0
+```
+[PASS] tests/conftest.py: exists
+RESULT: PASS — no required fixture dirs (inline conftest pattern in use); conftest healthy
+```
+
+## Python Test Suite (baseline sanity)
+- 15,599 tests collected (58 deselected: integration/e2e)
+- Core suite (test_hermes_constants, test_utils_truthy_values, test_packaging_metadata, test_retry_utils): 26 PASSED
+
+## Remaining Blockers (scope decisions — NOT infra fixes)
+- `tests/sanity/` directory missing → owner decision on test lane scope
+- `ws-tests/` directory missing → owner decision (Lanes 2 & 3 blocked)
+- These are scope/data blockers, not infra/config blockers
+
+## Status: INFRA/CONFIG BLOCKERS RESOLVED

@@ -1,0 +1,8 @@
+EXISTS
+
+
+MISSING
+/Users/aaronwhaley/Github/Roscoe-hermes/tests/fixtures
+/Users/aaronwhaley/Github/Roscoe-hermes/fixtures
+/Users/aaronwhaley/Github/Roscoe-hermes/data
+/Users/aaronwhaley/Github/Roscoe-hermes/test-data

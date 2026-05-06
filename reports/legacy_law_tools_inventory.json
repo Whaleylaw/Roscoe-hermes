@@ -1,0 +1,2571 @@
+[
+  {
+    "id": "_templates",
+    "dir": "_templates",
+    "name": "_templates",
+    "category": "",
+    "description": "AST error: invalid syntax (<unknown>, line 12)",
+    "semantic": "",
+    "status": "",
+    "py": "tool_template.py",
+    "py_exists": true,
+    "syntax_ok": false,
+    "imports": [],
+    "functions": [],
+    "hardcoded_paths": [],
+    "lines": 88
+  },
+  {
+    "id": "active_negotiations_report",
+    "dir": "active_negotiations_report",
+    "name": "Active Negotiations Report",
+    "category": "Reporting",
+    "description": "Generate report of cases in negotiation",
+    "semantic": "Show all cases currently in negotiation phase with claim details",
+    "status": "active",
+    "py": "active_negotiations_report.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "active_negotiations_report"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 50
+  },
+  {
+    "id": "advance_phase",
+    "dir": "advance_phase",
+    "name": "Advance Case Phase",
+    "category": "Workflow Management",
+    "description": "Advance case to next workflow phase",
+    "semantic": "Move case forward to the next phase in the workflow",
+    "status": "active",
+    "py": "advance_phase.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "advance_phase"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 76
+  },
+  {
+    "id": "analyze_audio",
+    "dir": "analyze_audio",
+    "name": "Analyze Audio",
+    "category": "vision",
+    "description": "Transcribe and analyze an audio file using OpenAI Whisper.  Perfect for analyzing 911 calls, witness statements, dispatch recordings, recorded depositions, or any audio evidence in personal injury cases. ",
+    "semantic": "Transcribe and analyze an audio file using OpenAI Whisper.  Perfect for analyzing 911 calls, witness statements, dispatch recordings, recorded depositions, or any audio evidence in personal injury cases. ",
+    "status": "active",
+    "py": "analyze_audio.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "os",
+      "pathlib",
+      "typing"
+    ],
+    "functions": [
+      "analyze_audio"
+    ],
+    "hardcoded_paths": [],
+    "lines": 106
+  },
+  {
+    "id": "analyze_image",
+    "dir": "analyze_image",
+    "name": "Analyze Image",
+    "category": "vision",
+    "description": "Analyze an image file using Google Gemini's multimodal vision capabilities.  Perfect for analyzing accident photos, scene documentation, injury photos, property damage, or any visual evidence in personal injury cases. ",
+    "semantic": "Analyze an image file using Google Gemini's multimodal vision capabilities.  Perfect for analyzing accident photos, scene documentation, injury photos, property damage, or any visual evidence in personal injury cases. ",
+    "status": "active",
+    "py": "analyze_image.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "base64",
+      "os",
+      "pathlib",
+      "typing"
+    ],
+    "functions": [
+      "get_multimodal_llm",
+      "analyze_image"
+    ],
+    "hardcoded_paths": [],
+    "lines": 117
+  },
+  {
+    "id": "analyze_video",
+    "dir": "analyze_video",
+    "name": "Analyze Video",
+    "category": "vision",
+    "description": "Analyze a video file using Google Gemini's multimodal video capabilities.  Perfect for analyzing body camera footage, dashcam videos, surveillance footage, deposition videos, or any video evidence in personal injury cases. ",
+    "semantic": "Analyze a video file using Google Gemini's multimodal video capabilities.  Perfect for analyzing body camera footage, dashcam videos, surveillance footage, deposition videos, or any video evidence in personal injury cases. ",
+    "status": "active",
+    "py": "analyze_video.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "base64",
+      "os",
+      "pathlib",
+      "typing"
+    ],
+    "functions": [
+      "get_multimodal_llm",
+      "analyze_video"
+    ],
+    "hardcoded_paths": [],
+    "lines": 129
+  },
+  {
+    "id": "batch_cleanup_markdown",
+    "dir": "batch_cleanup_markdown",
+    "name": "Batch Cleanup Markdown",
+    "category": "document_processing",
+    "description": "Batch cleanup multiple markdown files from PDF conversion.",
+    "semantic": "Batch cleanup multiple markdown files from PDF conversion.",
+    "status": "active",
+    "py": "batch_cleanup_markdown.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "pathlib",
+      "subprocess",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "find_markdown_files",
+      "main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 197
+  },
+  {
+    "id": "calendar_add_event_internal",
+    "dir": "calendar_add_event_internal",
+    "name": "Calendar Add Event (Internal)",
+    "category": "calendar",
+    "description": "Add events to the internal FalkorDB graph as CalendarEvent entities (NOT Google Calendar or JSON).",
+    "semantic": "Add events to the FalkorDB knowledge graph as CalendarEvent entities for case management and deadline tracking.",
+    "status": "active",
+    "py": "calendar_add_event.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "asyncio",
+      "json",
+      "typing"
+    ],
+    "functions": [
+      "main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 126
+  },
+  {
+    "id": "calendar_delete_event_internal",
+    "dir": "calendar_delete_event_internal",
+    "name": "Calendar Delete Event (Internal)",
+    "category": "calendar",
+    "description": "Delete CalendarEvent entities from the FalkorDB knowledge graph (NOT Google Calendar or JSON).",
+    "semantic": "Delete CalendarEvent entities from the FalkorDB knowledge graph.",
+    "status": "active",
+    "py": "calendar_delete_event.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "asyncio",
+      "json",
+      "typing"
+    ],
+    "functions": [
+      "main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 101
+  },
+  {
+    "id": "calendar_list_events_internal",
+    "dir": "calendar_list_events_internal",
+    "name": "Calendar List Events (Internal)",
+    "category": "calendar",
+    "description": "List CalendarEvent entities from the FalkorDB knowledge graph (NOT Google Calendar or JSON).",
+    "semantic": "Query and list CalendarEvent entities from the FalkorDB knowledge graph with flexible filtering.",
+    "status": "active",
+    "py": "calendar_list_events.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "asyncio",
+      "json",
+      "typing"
+    ],
+    "functions": [
+      "main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 116
+  },
+  {
+    "id": "calendar_update_event_internal",
+    "dir": "calendar_update_event_internal",
+    "name": "Calendar Update Event (Internal)",
+    "category": "calendar",
+    "description": "Update CalendarEvent entities in the FalkorDB knowledge graph (NOT Google Calendar or JSON).",
+    "semantic": "Update existing CalendarEvent entities in the FalkorDB knowledge graph.",
+    "status": "active",
+    "py": "calendar_update_event.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "asyncio",
+      "json",
+      "typing"
+    ],
+    "functions": [
+      "main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 143
+  },
+  {
+    "id": "case_file_organizer",
+    "dir": "case_file_organizer",
+    "name": "Case File Organizer",
+    "category": "case_management",
+    "description": "Analyzes case project files using Gemini vision and produces a structured JSON manifest with classification, date, creator, and description for each file. A second function applies the manifest \u2014 renaming files and moving them into the correct folder structure. All-dashes naming convention.\n",
+    "semantic": "Organize and classify case project documents into standardized folder structure with consistent naming using Gemini vision analysis. Two-phase: analyze to create manifest, then apply to rename and move files.\n",
+    "status": "active",
+    "py": "case_file_organizer.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "email",
+      "email.parser",
+      "enum",
+      "google",
+      "json",
+      "os",
+      "pathlib",
+      "pydantic",
+      "re",
+      "shutil",
+      "subprocess",
+      "sys",
+      "tempfile",
+      "typing",
+      "warnings"
+    ],
+    "functions": [
+      "_load_key_from_file",
+      "get_client",
+      "parse_folder_name",
+      "discover_files",
+      "build_initial_manifest",
+      "prepare_file_for_gemini",
+      "cleanup_temp",
+      "analyze_document",
+      "get_medical_providers",
+      "classify_medical_document"
+    ],
+    "hardcoded_paths": [
+      "/Users/aaronwhaley/Downloads/agent-roscoe/KEYS-1.txt",
+      "/Volumes/X10 Pro/projects/active"
+    ],
+    "lines": 652
+  },
+  {
+    "id": "check_job",
+    "dir": "check_job",
+    "name": "Check Job",
+    "category": "medical_analysis",
+    "description": "Check the status of any dispatched background job.  Works with all job types (medical records analysis, etc.). ",
+    "semantic": "Check the status of any dispatched background job.  Works with all job types (medical records analysis, etc.). ",
+    "status": "active",
+    "py": "check_job.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json",
+      "os",
+      "pathlib"
+    ],
+    "functions": [
+      "check_job"
+    ],
+    "hardcoded_paths": [],
+    "lines": 94
+  },
+  {
+    "id": "checkin_tracker",
+    "dir": "checkin_tracker",
+    "name": "Check-In Tracker",
+    "category": "client_management",
+    "description": "Track bi-weekly client check-ins during treatment. Record providers and status.",
+    "semantic": "Track bi-weekly client check-ins during treatment. Record providers and status.",
+    "status": "active",
+    "py": "checkin_tracker.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "dataclasses",
+      "datetime",
+      "json",
+      "pathlib",
+      "roscoe.core.workspace_utils",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "get_checkin_file",
+      "load_checkin_state",
+      "save_checkin_state",
+      "calculate_days_since",
+      "check_for_flags",
+      "record_checkin",
+      "schedule_checkin",
+      "get_checkin_questions",
+      "print_status",
+      "print_history"
+    ],
+    "hardcoded_paths": [],
+    "lines": 640
+  },
+  {
+    "id": "chronology_tools",
+    "dir": "chronology_tools",
+    "name": "Chronology Tools",
+    "category": "utility",
+    "description": "Medical chronology generation with research cache and PDF output.",
+    "semantic": "Medical chronology generation with research cache and PDF output.",
+    "status": "active",
+    "py": "chronology_tools.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "os",
+      "pathlib",
+      "typing"
+    ],
+    "functions": [
+      "load_research_cache",
+      "save_research_cache",
+      "add_researched_term",
+      "get_cached_definition",
+      "is_standard_abbreviation",
+      "get_abbreviation_expansion",
+      "create_chronology_entry",
+      "create_comment",
+      "suggest_definitions",
+      "identify_treatment_gaps"
+    ],
+    "hardcoded_paths": [],
+    "lines": 625
+  },
+  {
+    "id": "cleanup_markdown",
+    "dir": "cleanup_markdown",
+    "name": "Cleanup Markdown",
+    "category": "document_processing",
+    "description": "Clean PDF-to-markdown artifacts (cid codes, broken Unicode, repeating headers).",
+    "semantic": "Clean PDF-to-markdown artifacts (cid codes, broken Unicode, repeating headers).",
+    "status": "active",
+    "py": "cleanup_markdown.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "pathlib",
+      "re",
+      "sys"
+    ],
+    "functions": [
+      "cleanup_markdown",
+      "main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 179
+  },
+  {
+    "id": "combine_letter_and_hipaa",
+    "dir": "combine_letter_and_hipaa",
+    "name": "Combine Letter and HIPAA",
+    "category": "utility",
+    "description": "Combine letter templates with HIPAA authorization forms.",
+    "semantic": "Combine letter templates with HIPAA authorization forms.",
+    "status": "active",
+    "py": "combine_letter_and_hipaa.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "os",
+      "pathlib",
+      "subprocess",
+      "sys"
+    ],
+    "functions": [
+      "markdown_to_pdf_simple",
+      "combine_pdfs",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 210
+  },
+  {
+    "id": "combine_pdfs",
+    "dir": "combine_pdfs",
+    "name": "Combine PDFs",
+    "category": "utility",
+    "description": "Combine multiple PDFs and convert markdown to PDF.",
+    "semantic": "Combine multiple PDFs and convert markdown to PDF.",
+    "status": "active",
+    "py": "combine_pdfs.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "os",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "markdown_to_pdf",
+      "combine_pdfs",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 254
+  },
+  {
+    "id": "complete_calendar_event",
+    "dir": "complete_calendar_event",
+    "name": "Complete Calendar Event",
+    "category": "Calendar",
+    "description": "Mark calendar event as complete",
+    "semantic": "Mark task or deadline as completed",
+    "status": "active",
+    "py": "complete_calendar_event.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "complete_calendar_event"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 36
+  },
+  {
+    "id": "copy_file",
+    "dir": "copy_file",
+    "name": "Copy File",
+    "category": "file_operations",
+    "description": "Copy a file from one location to another in the workspace.  Use this when: - You need a file in multiple locations - Creating a backup before modifying - Duplicating a template for a new use ",
+    "semantic": "Copy a file from one location to another in the workspace.  Use this when: - You need a file in multiple locations - Creating a backup before modifying - Duplicating a template for a new use ",
+    "status": "active",
+    "py": "copy_file.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "os",
+      "pathlib"
+    ],
+    "functions": [
+      "copy_file"
+    ],
+    "hardcoded_paths": [],
+    "lines": 101
+  },
+  {
+    "id": "create_calendar_event",
+    "dir": "create_calendar_event",
+    "name": "Create Calendar Event",
+    "category": "Calendar",
+    "description": "Create case calendar event",
+    "semantic": "Add task, deadline, or hearing to case calendar",
+    "status": "active",
+    "py": "create_calendar_event.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "create_calendar_event"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 56
+  },
+  {
+    "id": "create_case",
+    "dir": "create_case",
+    "name": "Create Case",
+    "category": "Knowledge Graph",
+    "description": "Create new case with empty JSON files",
+    "semantic": "Initialize a new case with all required JSON files",
+    "status": "active",
+    "py": "create_case.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "create_case"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 69
+  },
+  {
+    "id": "create_document_from_template",
+    "dir": "create_document_from_template",
+    "name": "Create Document From Template",
+    "category": "templates",
+    "description": "Generate a document from a template.  Templates can operate in two modes:  **Graph mode (input_mode='graph'):** - Provide case_name and required graph_inputs (like provider_name) - The tool automatically pulls client info, dates, etc. from the knowledge graph - Best for standard correspondence tied to a case  **Direct mode (input_mode='direct'):** - Provide all required fields manually in the inputs dict - Best for one-off letters or when graph data isn't available ",
+    "semantic": "Generate a document from a template.  Templates can operate in two modes:  **Graph mode (input_mode='graph'):** - Provide case_name and required graph_inputs (like provider_name) - The tool automatically pulls client info, dates, etc. from the knowledge graph - Best for standard correspondence tied to a case  **Direct mode (input_mode='direct'):** - Provide all required fields manually in the inputs dict - Best for one-off letters or when graph data isn't available ",
+    "status": "active",
+    "py": "create_document_from_template.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "logging",
+      "os",
+      "typing"
+    ],
+    "functions": [
+      "_run_calendar_async",
+      "create_document_from_template"
+    ],
+    "hardcoded_paths": [],
+    "lines": 154
+  },
+  {
+    "id": "create_file_inventory",
+    "dir": "create_file_inventory",
+    "name": "Create File Inventory",
+    "category": "utility",
+    "description": "Generate file inventory reports for case folders.",
+    "semantic": "Generate file inventory reports for case folders.",
+    "status": "active",
+    "py": "create_file_inventory.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json",
+      "os",
+      "pathlib",
+      "shutil",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "create_file_inventory",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 165
+  },
+  {
+    "id": "dispatch_case_file_organization",
+    "dir": "dispatch_case_file_organization",
+    "name": "Dispatch Case File Organization",
+    "category": "medical_analysis",
+    "description": "Dispatch case file organization to a background agent.  Spawns file organization job that: - Analyzes all files in case folder (content-based, no filename bias) - Categorizes into 9-bucket system - Renames according to naming convention (yyyy-mm-dd-Client-Category-Who-What) - Reorganizes into proper directory structure - Supports parallelization for large file sets (>40 files) ",
+    "semantic": "Dispatch case file organization to a background agent.  Spawns file organization job that: - Analyzes all files in case folder (content-based, no filename bias) - Categorizes into 9-bucket system - Renames according to naming convention (yyyy-mm-dd-Client-Category-Who-What) - Reorganizes into proper directory structure - Supports parallelization for large file sets (>40 files) ",
+    "status": "active",
+    "py": "dispatch_case_file_organization.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "os",
+      "pathlib",
+      "sys",
+      "tempfile",
+      "typing"
+    ],
+    "functions": [
+      "_atomic_json_write",
+      "_run_inventory_preflight",
+      "_invoke_langgraph_agent",
+      "dispatch_case_file_organization"
+    ],
+    "hardcoded_paths": [],
+    "lines": 335
+  },
+  {
+    "id": "dispatch_email_task",
+    "dir": "dispatch_email_task",
+    "name": "Dispatch Email Task",
+    "category": "communication",
+    "description": "Dispatch a complex email processing task to the email assistant sub-agent.  Use this for tasks like: - Searching email content across many messages - Analyzing email threads for context - Bulk email categorization - Extracting attachments from multiple emails - Finding related email conversations  The task runs in the background and appears in the Kanban board. ",
+    "semantic": "Dispatch a complex email processing task to the email assistant sub-agent.  Use this for tasks like: - Searching email content across many messages - Analyzing email threads for context - Bulk email categorization - Extracting attachments from multiple emails - Finding related email conversations  The task runs in the background and appears in the Kanban board. ",
+    "status": "active",
+    "py": "dispatch_email_task.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "os",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "_invoke_langgraph_agent",
+      "dispatch_email_task"
+    ],
+    "hardcoded_paths": [],
+    "lines": 203
+  },
+  {
+    "id": "dispatch_medical_records_analysis",
+    "dir": "dispatch_medical_records_analysis",
+    "name": "Dispatch Medical Records Analysis",
+    "category": "medical_analysis",
+    "description": "Dispatch comprehensive medical records analysis to a background agent.  This starts a fire-and-forget analysis workflow that runs asynchronously. The analysis agent will: 1. Extract facts from litigation documents (complaint, police reports) 2. Inventory and extract all medical records 3. Build treatment chronology 4. Analyze causation, inconsistencies, red flags, missing records 5. Create attorney-ready FINAL_SUMMARY.md  You can continue with other tasks while the analysis runs in the background. Use check_job(job_id) to check progress. ",
+    "semantic": "Dispatch comprehensive medical records analysis to a background agent.  This starts a fire-and-forget analysis workflow that runs asynchronously. The analysis agent will: 1. Extract facts from litigation documents (complaint, police reports) 2. Inventory and extract all medical records 3. Build treatment chronology 4. Analyze causation, inconsistencies, red flags, missing records 5. Create attorney-ready FINAL_SUMMARY.md  You can continue with other tasks while the analysis runs in the background. Use check_job(job_id) to check progress. ",
+    "status": "active",
+    "py": "dispatch_medical_records_analysis.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "os",
+      "pathlib"
+    ],
+    "functions": [
+      "_invoke_langgraph_agent",
+      "dispatch_medical_records_analysis"
+    ],
+    "hardcoded_paths": [],
+    "lines": 195
+  },
+  {
+    "id": "display_document",
+    "dir": "display_document",
+    "name": "Display Document",
+    "category": "file_operations",
+    "description": "Display a document or artifact in the UI canvas (right panel).  Use this when: - You've created an HTML report/visualization and want to show it to the user - You want to display a PDF, Word doc, or other viewable file - You want to highlight a specific document for the user to review - After creating any artifact that the user should see immediately  The UI will automatically open the right panel and display the document.  Supported file types: - HTML (.html) - Rendered in secure sandbox - PDF (.pdf) - Displayed with page controls - Word (.docx) - Converted to viewable format - Markdown (.md) - Rendered with formatting - Images (.png, .jpg, .gif) - Displayed directly ",
+    "semantic": "Display a document or artifact in the UI canvas (right panel).  Use this when: - You've created an HTML report/visualization and want to show it to the user - You want to display a PDF, Word doc, or other viewable file - You want to highlight a specific document for the user to review - After creating any artifact that the user should see immediately  The UI will automatically open the right panel and display the document.  Supported file types: - HTML (.html) - Rendered in secure sandbox - PDF (.pdf) - Displayed with page controls - Word (.docx) - Converted to viewable format - Markdown (.md) - Rendered with formatting - Images (.png, .jpg, .gif) - Displayed directly ",
+    "status": "active",
+    "py": "display_document.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json",
+      "os",
+      "pathlib",
+      "typing"
+    ],
+    "functions": [
+      "display_document"
+    ],
+    "hardcoded_paths": [],
+    "lines": 136
+  },
+  {
+    "id": "docusign_send",
+    "dir": "docusign_send",
+    "name": "DocuSign Send",
+    "category": "esignature",
+    "description": "Send PDFs to signers via DocuSign envelopes.",
+    "semantic": "Send PDFs to signers via DocuSign envelopes.",
+    "status": "active",
+    "py": "docusign_send.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "base64",
+      "datetime",
+      "json",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "send_document",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 281
+  },
+  {
+    "id": "docusign_status",
+    "dir": "docusign_status",
+    "name": "DocuSign Status",
+    "category": "esignature",
+    "description": "Check signing status of DocuSign envelopes.",
+    "semantic": "Check signing status of DocuSign envelopes.",
+    "status": "active",
+    "py": "docusign_status.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "datetime",
+      "json",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "get_envelope_status",
+      "list_recent_envelopes",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 275
+  },
+  {
+    "id": "expert_witness_lookup",
+    "dir": "expert_witness_lookup",
+    "name": "Expert Witness Lookup",
+    "category": "research",
+    "description": "Look up expert witnesses and credentials.",
+    "semantic": "Look up expert witnesses and credentials.",
+    "status": "active",
+    "py": "expert_witness_lookup.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "json",
+      "ssl",
+      "sys",
+      "typing",
+      "urllib.error",
+      "urllib.parse",
+      "urllib.request"
+    ],
+    "functions": [
+      "_create_ssl_context",
+      "expert_witness_lookup",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 298
+  },
+  {
+    "id": "explore_citations",
+    "dir": "explore_citations",
+    "name": "Explore Citations",
+    "category": "legal_research",
+    "description": "Explore citation chains and relationships via CourtListener API.",
+    "semantic": "Explore citation chains and relationships via CourtListener API.",
+    "status": "active",
+    "py": "explore_citations.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "collections",
+      "dotenv",
+      "json",
+      "os",
+      "pathlib",
+      "requests",
+      "sys"
+    ],
+    "functions": [
+      "get_cluster_by_citation",
+      "get_citing_opinions",
+      "get_cited_opinions",
+      "explore_citation_network",
+      "main"
+    ],
+    "hardcoded_paths": [
+      "~/roscoe-workspace"
+    ],
+    "lines": 353
+  },
+  {
+    "id": "find_my_cases",
+    "dir": "find_my_cases",
+    "name": "Find My Cases",
+    "category": "legal_research",
+    "description": "Find dockets by attorney name via CourtListener.",
+    "semantic": "Find dockets by attorney name via CourtListener.",
+    "status": "active",
+    "py": "find_my_cases.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "dotenv",
+      "json",
+      "os",
+      "pathlib",
+      "requests",
+      "sys",
+      "typing",
+      "urllib.parse"
+    ],
+    "functions": [
+      "search_dockets_by_attorney",
+      "get_attorney_dockets_direct",
+      "main"
+    ],
+    "hardcoded_paths": [
+      "~/roscoe-workspace"
+    ],
+    "lines": 262
+  },
+  {
+    "id": "generate_demand_pdf",
+    "dir": "generate_demand_pdf",
+    "name": "Generate Demand PDF",
+    "category": "document_processing",
+    "description": "Generate demand letter as formatted PDF with firm letterhead.",
+    "semantic": "Generate demand letter as formatted PDF with firm letterhead.",
+    "status": "active",
+    "py": "generate_demand_pdf.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "datetime",
+      "json",
+      "os",
+      "pathlib",
+      "pypdf",
+      "re",
+      "reportlab.lib",
+      "reportlab.lib.enums",
+      "reportlab.lib.pagesizes",
+      "reportlab.lib.styles",
+      "reportlab.lib.units",
+      "reportlab.pdfbase",
+      "reportlab.pdfbase.ttfonts",
+      "reportlab.platypus",
+      "shutil",
+      "sys",
+      "typing",
+      "yaml"
+    ],
+    "functions": [
+      "load_firm_config",
+      "parse_demand_markdown",
+      "parse_markdown_tables",
+      "parse_provider_blocks",
+      "create_styles",
+      "generate_demand_pdf",
+      "create_exhibit_separator",
+      "compile_exhibits",
+      "create_full_demand_packet",
+      "main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 1019
+  },
+  {
+    "id": "generate_directory_browser",
+    "dir": "generate_directory_browser",
+    "name": "Generate Directory Browser",
+    "category": "file_operations",
+    "description": "Generate an interactive HTML directory browser for the workspace.  Creates a standalone HTML file that displays the directory structure with expandable folders and clickable files. The HTML is shown in the document viewer.  Use this when: - User asks to \"show me the files\" or \"what's in this folder\" - User wants to browse a project directory - User needs to see available reports or documents - Replacing the old left panel file browser ",
+    "semantic": "Generate an interactive HTML directory browser for the workspace.  Creates a standalone HTML file that displays the directory structure with expandable folders and clickable files. The HTML is shown in the document viewer.  Use this when: - User asks to \"show me the files\" or \"what's in this folder\" - User wants to browse a project directory - User needs to see available reports or documents - Replacing the old left panel file browser ",
+    "status": "active",
+    "py": "generate_directory_browser.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json",
+      "pathlib",
+      "typing"
+    ],
+    "functions": [
+      "should_skip_item",
+      "build_directory_tree",
+      "count_items",
+      "display_document",
+      "generate_directory_browser"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects"
+    ],
+    "lines": 520
+  },
+  {
+    "id": "get_case_insurance",
+    "dir": "get_case_insurance",
+    "name": "Get Case Insurance",
+    "category": "Case Queries",
+    "description": "Get insurance claims for a case",
+    "semantic": "Show insurance claims with adjusters and policy limits",
+    "status": "active",
+    "py": "get_case_insurance.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "get_case_insurance"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 36
+  },
+  {
+    "id": "get_case_liens",
+    "dir": "get_case_liens",
+    "name": "Get Case Liens",
+    "category": "Case Queries",
+    "description": "Get liens for a case",
+    "semantic": "Show list of liens against the case settlement",
+    "status": "active",
+    "py": "get_case_liens.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "get_case_liens"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 26
+  },
+  {
+    "id": "get_case_medical_summary",
+    "dir": "get_case_medical_summary",
+    "name": "Get Medical Summary",
+    "category": "Case Queries",
+    "description": "Get detailed medical treatment summary",
+    "semantic": "Show detailed medical treatment summary with recent visits and provider breakdown",
+    "status": "active",
+    "py": "get_case_medical_summary.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "get_case_medical_summary"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 44
+  },
+  {
+    "id": "get_case_overview",
+    "dir": "get_case_overview",
+    "name": "Get Case Overview",
+    "category": "Case Queries",
+    "description": "Get comprehensive case overview from JSON files",
+    "semantic": "Show quick summary of case with medical, insurance, and workflow info",
+    "status": "active",
+    "py": "get_case_overview.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json",
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "get_case_overview"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 61
+  },
+  {
+    "id": "get_case_providers",
+    "dir": "get_case_providers",
+    "name": "Get Case Providers",
+    "category": "Case Queries",
+    "description": "Get medical providers for a case",
+    "semantic": "Show list of medical providers who treated the client",
+    "status": "active",
+    "py": "get_case_providers.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "get_case_providers"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 26
+  },
+  {
+    "id": "get_case_structure",
+    "dir": "get_case_structure",
+    "name": "Get Case Structure",
+    "category": "Case Queries",
+    "description": "Get complete case structure",
+    "semantic": "Show comprehensive case information and structure",
+    "status": "active",
+    "py": "get_case_structure.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "get_case_structure"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 31
+  },
+  {
+    "id": "get_case_timeline",
+    "dir": "get_case_timeline",
+    "name": "Get Case Timeline",
+    "category": "Case Queries",
+    "description": "Get chronological timeline of all case events",
+    "semantic": "Show chronological timeline of medical visits, insurance claims, and litigation events",
+    "status": "active",
+    "py": "get_case_timeline.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "get_case_timeline"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 48
+  },
+  {
+    "id": "get_case_workflow_status",
+    "dir": "get_case_workflow_status",
+    "name": "Get Workflow Status",
+    "category": "Workflow Management",
+    "description": "Get detailed workflow status",
+    "semantic": "Show detailed workflow status with all landmarks",
+    "status": "active",
+    "py": "get_case_workflow_status.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "get_case_workflow_status"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 35
+  },
+  {
+    "id": "get_docket_details",
+    "dir": "get_docket_details",
+    "name": "Get Docket Details",
+    "category": "legal_research",
+    "description": "Retrieve full docket information including parties and documents.",
+    "semantic": "Retrieve full docket information including parties and documents.",
+    "status": "active",
+    "py": "get_docket_details.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "datetime",
+      "dotenv",
+      "json",
+      "os",
+      "pathlib",
+      "requests",
+      "sys"
+    ],
+    "functions": [
+      "get_docket_full_details",
+      "get_docket_entries",
+      "format_docket_summary",
+      "get_upcoming_events",
+      "main"
+    ],
+    "hardcoded_paths": [
+      "~/roscoe-workspace"
+    ],
+    "lines": 314
+  },
+  {
+    "id": "get_opinion_full_text",
+    "dir": "get_opinion_full_text",
+    "name": "Get Opinion Full Text",
+    "category": "legal_research",
+    "description": "Retrieve full text of legal opinions from CourtListener.",
+    "semantic": "Retrieve full text of legal opinions from CourtListener.",
+    "status": "active",
+    "py": "get_opinion_full_text.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "dotenv",
+      "json",
+      "os",
+      "pathlib",
+      "requests",
+      "sys"
+    ],
+    "functions": [
+      "get_opinion_details",
+      "get_cluster_details",
+      "get_opinion_full_text",
+      "main"
+    ],
+    "hardcoded_paths": [
+      "~/roscoe-workspace"
+    ],
+    "lines": 226
+  },
+  {
+    "id": "get_overdue_tasks",
+    "dir": "get_overdue_tasks",
+    "name": "Get Overdue Tasks",
+    "category": "Calendar",
+    "description": "Get all overdue calendar tasks",
+    "semantic": "Show tasks and deadlines that are past due",
+    "status": "active",
+    "py": "get_overdue_tasks.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "get_overdue_tasks"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 41
+  },
+  {
+    "id": "get_statute_status",
+    "dir": "get_statute_status",
+    "name": "Get Statute Status",
+    "category": "Workflow Management",
+    "description": "Get statute of limitations status",
+    "semantic": "Show statute of limitations date and remaining time",
+    "status": "active",
+    "py": "get_statute_status.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "get_statute_status"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 29
+  },
+  {
+    "id": "get_template_info",
+    "dir": "get_template_info",
+    "name": "Get Template Info",
+    "category": "ui_components",
+    "description": "Get detailed information about a specific UI template (3-tier discovery - Tier 2).  Shows description, required parameters, optional parameters, and features. ",
+    "semantic": "Get detailed information about a specific UI template (3-tier discovery - Tier 2).  Shows description, required parameters, optional parameters, and features. ",
+    "status": "active",
+    "py": "get_template_info.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "logging",
+      "typing"
+    ],
+    "functions": [
+      "get_template_info"
+    ],
+    "hardcoded_paths": [],
+    "lines": 81
+  },
+  {
+    "id": "get_workflow_resources",
+    "dir": "get_workflow_resources",
+    "name": "Get Workflow Resources",
+    "category": "Workflow Management",
+    "description": "Get workflow definitions (phases, landmarks, workflows)",
+    "semantic": "Show available workflow phases, landmarks, and workflow templates",
+    "status": "active",
+    "py": "get_workflow_resources.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "get_workflow_resources"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 28
+  },
+  {
+    "id": "google_calendar_create_event",
+    "dir": "google_calendar_create_event",
+    "name": "Google Calendar Create Event",
+    "category": "google_calendar",
+    "description": "Create events in Google Calendar (the actual Google Calendar, NOT internal calendar).",
+    "semantic": "Create events in the user's Google Calendar for legal deadlines, hearings, depositions, and meetings.",
+    "status": "active",
+    "py": "google_calendar_create_event.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "calendar_tools",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 117
+  },
+  {
+    "id": "google_calendar_delete_event",
+    "dir": "google_calendar_delete_event",
+    "name": "Google Calendar Delete Event",
+    "category": "google_calendar",
+    "description": "Delete/cancel events from Google Calendar (the actual Google Calendar, NOT internal calendar).",
+    "semantic": "Delete or cancel events from the user's Google Calendar.",
+    "status": "active",
+    "py": "google_calendar_delete_event.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "calendar_tools",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 68
+  },
+  {
+    "id": "google_calendar_list_events",
+    "dir": "google_calendar_list_events",
+    "name": "Google Calendar List Events",
+    "category": "google_calendar",
+    "description": "List upcoming events from Google Calendar (the actual Google Calendar, NOT internal calendar).",
+    "semantic": "List upcoming events from the user's Google Calendar with flexible filtering.",
+    "status": "active",
+    "py": "google_calendar_list_events.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "calendar_tools",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 75
+  },
+  {
+    "id": "google_calendar_update_event",
+    "dir": "google_calendar_update_event",
+    "name": "Google Calendar Update Event",
+    "category": "google_calendar",
+    "description": "Update events in Google Calendar (the actual Google Calendar, NOT internal calendar).",
+    "semantic": "Update existing events in the user's Google Calendar.",
+    "status": "active",
+    "py": "google_calendar_update_event.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "calendar_tools",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 91
+  },
+  {
+    "id": "graph_query",
+    "dir": "graph_query",
+    "name": "Graph Query",
+    "category": "knowledge_graph",
+    "description": "Query the knowledge graph directly for structural/relationship data.  Unlike query_case_graph (which uses semantic search), this tool runs predefined Cypher queries against the graph database for exact structural queries. Much faster for relationship-based lookups.  \u26a0\ufe0f IMPORTANT: This tool only supports predefined query types for safety. For custom graph queries, use the search_graph tool which provides a validated query builder system. ",
+    "semantic": "Query the knowledge graph directly for structural/relationship data.  Unlike query_case_graph (which uses semantic search), this tool runs predefined Cypher queries against the graph database for exact structural queries. Much faster for relationship-based lookups.  \u26a0\ufe0f IMPORTANT: This tool only supports predefined query types for safety. For custom graph queries, use the search_graph tool which provides a validated query builder system. ",
+    "status": "active",
+    "py": "graph_query.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "os",
+      "typing"
+    ],
+    "functions": [
+      "graph_query"
+    ],
+    "hardcoded_paths": [],
+    "lines": 217
+  },
+  {
+    "id": "import_documents",
+    "dir": "import_documents",
+    "name": "Import Documents",
+    "category": "document_processing",
+    "description": "Batch import PDFs into case folders with organization.",
+    "semantic": "Batch import PDFs into case folders with organization.",
+    "status": "active",
+    "py": "import_documents.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "collections",
+      "datetime",
+      "json",
+      "pathlib",
+      "subprocess",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "find_pdfs",
+      "process_pdf",
+      "create_import_log",
+      "create_document_index",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 468
+  },
+  {
+    "id": "internet_search",
+    "dir": "internet_search",
+    "name": "Internet Search",
+    "category": "research",
+    "description": "Internet search tool able to provide detailed search results and page content. ",
+    "semantic": "Internet search tool able to provide detailed search results and page content. ",
+    "status": "active",
+    "py": "internet_search.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "typing"
+    ],
+    "functions": [
+      "internet_search"
+    ],
+    "hardcoded_paths": [],
+    "lines": 44
+  },
+  {
+    "id": "internet_search_research",
+    "dir": "internet_search_research",
+    "name": "Internet Search (Research)",
+    "category": "research",
+    "description": "Internet search for research purposes (duplicate of internet_search).",
+    "semantic": "Internet search for research purposes (duplicate of internet_search).",
+    "status": "active",
+    "py": "internet_search.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "json",
+      "os",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "internet_search",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 192
+  },
+  {
+    "id": "kyecourts_docket",
+    "dir": "kyecourts_docket",
+    "name": "KY eCourts Docket",
+    "category": "web_scraping",
+    "description": "Playwright automation to retrieve Kentucky eCourts dockets.",
+    "semantic": "Playwright automation to retrieve Kentucky eCourts dockets.",
+    "status": "active",
+    "py": "kyecourts_docket.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "datetime",
+      "json",
+      "os",
+      "pathlib",
+      "re",
+      "roscoe.core.workspace_utils",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "get_credentials",
+      "login",
+      "navigate_to_case_search",
+      "search_case_by_number",
+      "click_first_case_result",
+      "extract_case_details",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 551
+  },
+  {
+    "id": "kyecourts_download_documents",
+    "dir": "kyecourts_download_documents",
+    "name": "KY eCourts Download",
+    "category": "web_scraping",
+    "description": "Download documents from Kentucky eCourts system.",
+    "semantic": "Download documents from Kentucky eCourts system.",
+    "status": "active",
+    "py": "kyecourts_download_documents.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "datetime",
+      "json",
+      "os",
+      "pathlib",
+      "re",
+      "roscoe.core.workspace_utils",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "get_credentials",
+      "login",
+      "navigate_to_case_search",
+      "search_and_open_case",
+      "get_document_list",
+      "sanitize_filename",
+      "download_document",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 520
+  },
+  {
+    "id": "lexis_crash_order",
+    "dir": "lexis_crash_order",
+    "name": "LexisNexis Crash Order",
+    "category": "crash_reports",
+    "description": "Playwright automation to order police/crash reports from LexisNexis BuyCrash.",
+    "semantic": "Playwright automation to order police/crash reports from LexisNexis BuyCrash.",
+    "status": "active",
+    "py": "lexis_crash_order.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "datetime",
+      "json",
+      "os",
+      "pathlib",
+      "roscoe.core.workspace_utils",
+      "sys",
+      "time",
+      "typing"
+    ],
+    "functions": [
+      "ensure_config_dir",
+      "save_cookies",
+      "load_cookies",
+      "login_to_lexis",
+      "navigate_to_buycrash",
+      "search_report",
+      "download_report",
+      "order_crash_report",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 633
+  },
+  {
+    "id": "list_available_templates",
+    "dir": "list_available_templates",
+    "name": "List Available Templates",
+    "category": "ui_components",
+    "description": "List all available UI templates (3-tier discovery - Tier 1).  Shows high-level overview of available dashboards and components. Use get_template_info() to see detailed information about a specific template. ",
+    "semantic": "List all available UI templates (3-tier discovery - Tier 1).  Shows high-level overview of available dashboards and components. Use get_template_info() to see detailed information about a specific template. ",
+    "status": "active",
+    "py": "list_available_templates.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "typing"
+    ],
+    "functions": [
+      "list_available_templates"
+    ],
+    "hardcoded_paths": [],
+    "lines": 64
+  },
+  {
+    "id": "list_calendar_events",
+    "dir": "list_calendar_events",
+    "name": "List Calendar Events",
+    "category": "Calendar",
+    "description": "List calendar events for a case",
+    "semantic": "Show all calendar events for a case with optional status filter",
+    "status": "active",
+    "py": "list_calendar_events.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "list_calendar_events"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 37
+  },
+  {
+    "id": "list_document_templates",
+    "dir": "list_document_templates",
+    "name": "List Document Templates",
+    "category": "templates",
+    "description": "List all available document templates.  Templates are DOCX files with merge fields ({{field_name}}) that can be automatically populated with case data from the knowledge graph or manual input. ",
+    "semantic": "List all available document templates.  Templates are DOCX files with merge fields ({{field_name}}) that can be automatically populated with case data from the knowledge graph or manual input. ",
+    "status": "active",
+    "py": "list_document_templates.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "logging",
+      "typing"
+    ],
+    "functions": [
+      "list_document_templates"
+    ],
+    "hardcoded_paths": [],
+    "lines": 77
+  },
+  {
+    "id": "list_jobs",
+    "dir": "list_jobs",
+    "name": "List Jobs",
+    "category": "medical_analysis",
+    "description": "List all background jobs, optionally filtered by job type.  Shows jobs grouped by type with status, case name, and phase information. Excludes archived jobs. ",
+    "semantic": "List all background jobs, optionally filtered by job type.  Shows jobs grouped by type with status, case name, and phase information. Excludes archived jobs. ",
+    "status": "active",
+    "py": "list_jobs.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json",
+      "os",
+      "pathlib",
+      "typing"
+    ],
+    "functions": [
+      "list_jobs"
+    ],
+    "hardcoded_paths": [],
+    "lines": 104
+  },
+  {
+    "id": "list_skills",
+    "dir": "list_skills",
+    "name": "List Skills",
+    "category": "research",
+    "description": "List all available skills with their YAML descriptions.  Use this tool when you need to: - See what skills are available for a task - Find the right skill for a specific workflow - Understand what capabilities are available  The middleware automatically injects relevant skills based on user messages, but you can use this tool to manually browse and select skills when needed. ",
+    "semantic": "List all available skills with their YAML descriptions.  Use this tool when you need to: - See what skills are available for a task - Find the right skill for a specific workflow - Understand what capabilities are available  The middleware automatically injects relevant skills based on user messages, but you can use this tool to manually browse and select skills when needed. ",
+    "status": "active",
+    "py": "list_skills.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [],
+    "functions": [
+      "list_skills"
+    ],
+    "hardcoded_paths": [],
+    "lines": 39
+  },
+  {
+    "id": "load_skill",
+    "dir": "load_skill",
+    "name": "Load Skill",
+    "category": "research",
+    "description": "Load a specific skill by name and return its full content.  Use this when: - The middleware didn't auto-select the skill you need - You want to explicitly use a specific skill - You need to see the full skill instructions ",
+    "semantic": "Load a specific skill by name and return its full content.  Use this when: - The middleware didn't auto-select the skill you need - You want to explicitly use a specific skill - You need to see the full skill instructions ",
+    "status": "active",
+    "py": "load_skill.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [],
+    "functions": [
+      "load_skill"
+    ],
+    "hardcoded_paths": [],
+    "lines": 54
+  },
+  {
+    "id": "load_ui_template",
+    "dir": "load_ui_template",
+    "name": "Load Ui Template",
+    "category": "ui_components",
+    "description": "Load a pre-built UI template with live graph data.  Use this to display interactive dashboards, chronologies, and visualizations without writing HTML. Templates are pre-built React components that automatically fetch and display graph data. ",
+    "semantic": "Load a pre-built UI template with live graph data.  Use this to display interactive dashboards, chronologies, and visualizations without writing HTML. Templates are pre-built React components that automatically fetch and display graph data. ",
+    "status": "active",
+    "py": "load_ui_template.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "asyncio",
+      "json",
+      "logging",
+      "typing"
+    ],
+    "functions": [
+      "load_ui_template"
+    ],
+    "hardcoded_paths": [],
+    "lines": 80
+  },
+  {
+    "id": "mark_email_read",
+    "dir": "mark_email_read",
+    "name": "Mark Email Read",
+    "category": "Email",
+    "description": "Mark email as read in JSON backend",
+    "semantic": "Remove email from unread list",
+    "status": "active",
+    "py": "mark_email_read.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "mark_email_read"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 35
+  },
+  {
+    "id": "medical_request_generator",
+    "dir": "medical_request_generator",
+    "name": "Medical Request Generator",
+    "category": "document_processing",
+    "description": "Generate medical records request letters with HIPAA authorization.",
+    "semantic": "Generate medical records request letters with HIPAA authorization.",
+    "status": "active",
+    "py": "medical_request_generator.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "datetime",
+      "io",
+      "json",
+      "os",
+      "pathlib",
+      "pypdf",
+      "reportlab.lib.pagesizes",
+      "reportlab.lib.units",
+      "reportlab.pdfgen",
+      "sys",
+      "tempfile",
+      "typing"
+    ],
+    "functions": [
+      "load_case_data",
+      "load_provider_data",
+      "find_signed_hipaa",
+      "create_provider_overlay",
+      "create_date_overlay",
+      "fill_hipaa_with_provider",
+      "fill_request_letter",
+      "generate_medical_request",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 616
+  },
+  {
+    "id": "monitor_upcoming_dates",
+    "dir": "monitor_upcoming_dates",
+    "name": "Monitor Upcoming Dates",
+    "category": "legal_research",
+    "description": "Monitor upcoming court dates from dockets.",
+    "semantic": "Monitor upcoming court dates from dockets.",
+    "status": "active",
+    "py": "monitor_upcoming_dates.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "collections",
+      "datetime",
+      "dotenv",
+      "json",
+      "os",
+      "pathlib",
+      "requests",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "get_docket_details",
+      "get_docket_entries",
+      "find_attorney_dockets",
+      "extract_upcoming_events",
+      "monitor_upcoming_dates",
+      "main"
+    ],
+    "hardcoded_paths": [
+      "~/roscoe-workspace"
+    ],
+    "lines": 368
+  },
+  {
+    "id": "move_file",
+    "dir": "move_file",
+    "name": "Move File",
+    "category": "file_operations",
+    "description": "Move a file from one location to another in the workspace.  Use this when: - A tool creates a file in /Reports/ and you need to move it to a case folder - User uploads a document that needs to be filed in the correct bucket - Reorganizing files between folders - Renaming a file (move to same directory with new name) ",
+    "semantic": "Move a file from one location to another in the workspace.  Use this when: - A tool creates a file in /Reports/ and you need to move it to a case folder - User uploads a document that needs to be filed in the correct bucket - Reorganizing files between folders - Renaming a file (move to same directory with new name) ",
+    "status": "active",
+    "py": "move_file.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "os",
+      "pathlib"
+    ],
+    "functions": [
+      "move_file"
+    ],
+    "hardcoded_paths": [],
+    "lines": 108
+  },
+  {
+    "id": "negotiation_tracker",
+    "dir": "negotiation_tracker",
+    "name": "Negotiation Tracker",
+    "category": "negotiation",
+    "description": "Track negotiation history, offers, counteroffers, and settlement amounts.",
+    "semantic": "Track negotiation history, offers, counteroffers, and settlement amounts.",
+    "status": "active",
+    "py": "negotiation_tracker.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "dataclasses",
+      "datetime",
+      "decimal",
+      "json",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "money",
+      "format_currency",
+      "get_negotiation_file",
+      "load_negotiation",
+      "save_negotiation",
+      "add_event",
+      "get_negotiation_summary",
+      "print_status",
+      "print_history",
+      "main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 603
+  },
+  {
+    "id": "oral_arguments_search",
+    "dir": "oral_arguments_search",
+    "name": "Oral Arguments Search",
+    "category": "legal_research",
+    "description": "Search oral argument transcripts via CourtListener.",
+    "semantic": "Search oral argument transcripts via CourtListener.",
+    "status": "active",
+    "py": "oral_arguments_search.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "certifi",
+      "dotenv",
+      "json",
+      "os",
+      "pathlib",
+      "ssl",
+      "sys",
+      "typing",
+      "urllib.error",
+      "urllib.parse",
+      "urllib.request"
+    ],
+    "functions": [
+      "oral_arguments_search",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [
+      "~/roscoe-workspace"
+    ],
+    "lines": 312
+  },
+  {
+    "id": "outstanding_medical_bills_report",
+    "dir": "outstanding_medical_bills_report",
+    "name": "Outstanding Medical Bills Report",
+    "category": "reporting",
+    "description": "Report unpaid medical bills by case.",
+    "semantic": "Report unpaid medical bills by case.",
+    "status": "active",
+    "py": "outstanding_medical_bills_report.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "datetime",
+      "json",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "calculate_days_since",
+      "generate_report",
+      "format_markdown",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 266
+  },
+  {
+    "id": "outstanding_medical_records_report",
+    "dir": "outstanding_medical_records_report",
+    "name": "Outstanding Medical Records Report",
+    "category": "reporting",
+    "description": "Report missing or pending medical records requests.",
+    "semantic": "Report missing or pending medical records requests.",
+    "status": "active",
+    "py": "outstanding_medical_records_report.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "datetime",
+      "json",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "calculate_days_since",
+      "generate_report",
+      "format_markdown",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 266
+  },
+  {
+    "id": "pip_waterfall",
+    "dir": "pip_waterfall",
+    "name": "PIP Waterfall",
+    "category": "insurance",
+    "description": "Determine correct PIP insurer per Kentucky statutory waterfall rules.",
+    "semantic": "Determine correct PIP insurer per Kentucky statutory waterfall rules.",
+    "status": "active",
+    "py": "pip_waterfall.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "dataclasses",
+      "datetime",
+      "json",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "run_waterfall",
+      "interactive_waterfall",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 556
+  },
+  {
+    "id": "pubmed_search",
+    "dir": "pubmed_search",
+    "name": "PubMed Search",
+    "category": "medical_research",
+    "description": "Search 39M+ NCBI citations for medical causation research.",
+    "semantic": "Search 39M+ NCBI citations for medical causation research.",
+    "status": "active",
+    "py": "pubmed_search.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "json",
+      "os",
+      "sys",
+      "time",
+      "typing"
+    ],
+    "functions": [
+      "pubmed_search",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 279
+  },
+  {
+    "id": "query_case_graph",
+    "dir": "query_case_graph",
+    "name": "Query Case Graph",
+    "category": "knowledge_graph",
+    "description": "Search the knowledge graph using natural language.  This tool performs semantic search across all case data stored in Graphiti. It can find information even if you don't know the exact wording - the graph understands meaning and relationships. ",
+    "semantic": "Search the knowledge graph using natural language.  This tool performs semantic search across all case data stored in Graphiti. It can find information even if you don't know the exact wording - the graph understands meaning and relationships. ",
+    "status": "active",
+    "py": "query_case_graph.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "os",
+      "typing"
+    ],
+    "functions": [
+      "query_case_graph"
+    ],
+    "hardcoded_paths": [],
+    "lines": 93
+  },
+  {
+    "id": "read_multimodal_file",
+    "dir": "read_multimodal_file",
+    "name": "Read Multimodal File",
+    "category": "vision",
+    "description": "Read and analyze an image or PDF file using Claude's native vision capabilities.  Auto-detects file type and uses appropriate Anthropic content block format: - Images (PNG, JPEG, GIF, WEBP): Uses 'image' content block - PDFs: Uses 'document' content block (Claude 4+ native support, no conversion)  Uses the agent's main model for analysis (respects MODEL_PROVIDER setting). ",
+    "semantic": "Read and analyze an image or PDF file using Claude's native vision capabilities.  Auto-detects file type and uses appropriate Anthropic content block format: - Images (PNG, JPEG, GIF, WEBP): Uses 'image' content block - PDFs: Uses 'document' content block (Claude 4+ native support, no conversion)  Uses the agent's main model for analysis (respects MODEL_PROVIDER setting). ",
+    "status": "active",
+    "py": "read_multimodal_file.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "os",
+      "pathlib",
+      "typing"
+    ],
+    "functions": [
+      "_analyze_image_anthropic",
+      "_analyze_pdf_anthropic",
+      "read_multimodal_file"
+    ],
+    "hardcoded_paths": [],
+    "lines": 87
+  },
+  {
+    "id": "read_pdf",
+    "dir": "read_pdf",
+    "name": "Read PDF",
+    "category": "document_processing",
+    "description": "Extract text from PDFs using tiered extraction (PDFPlumber \u2192 Tesseract OCR). Outputs markdown with caching.",
+    "semantic": "Extract text from PDFs using tiered extraction (PDFPlumber \u2192 Tesseract OCR). Outputs markdown with caching.",
+    "status": "active",
+    "py": "read_pdf.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "datetime",
+      "json",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "format_as_markdown",
+      "check_cache",
+      "extract_pdf_text",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 626
+  },
+  {
+    "id": "recalculate_case_phase",
+    "dir": "recalculate_case_phase",
+    "name": "Recalculate Case Phase",
+    "category": "Workflow Management",
+    "description": "Analyze phase readiness and blockers",
+    "semantic": "Check if case is ready to advance to next phase",
+    "status": "active",
+    "py": "recalculate_case_phase.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "recalculate_case_phase"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 39
+  },
+  {
+    "id": "refresh_skills",
+    "dir": "refresh_skills",
+    "name": "Refresh Skills",
+    "category": "research",
+    "description": "Rescan skills directory and reload all skills.  Use this if new skills have been added mid-session and you want to make them available without restarting. ",
+    "semantic": "Rescan skills directory and reload all skills.  Use this if new skills have been added mid-session and you want to make them available without restarting. ",
+    "status": "active",
+    "py": "refresh_skills.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [],
+    "functions": [
+      "refresh_skills"
+    ],
+    "hardcoded_paths": [],
+    "lines": 34
+  },
+  {
+    "id": "remove_job",
+    "dir": "remove_job",
+    "name": "Remove Job",
+    "category": "medical_analysis",
+    "description": "Remove one or more background jobs from the active list.  This archives jobs by moving them to a .archived subdirectory. All job data is preserved for audit purposes - this only hides the job from list_jobs().  Works with all job types. Jobs can be in any state (queued, running, completed, failed). Removing a running job does NOT cancel it - the background agent will continue until completion. ",
+    "semantic": "Remove one or more background jobs from the active list.  This archives jobs by moving them to a .archived subdirectory. All job data is preserved for audit purposes - this only hides the job from list_jobs().  Works with all job types. Jobs can be in any state (queued, running, completed, failed). Removing a running job does NOT cancel it - the background agent will continue until completion. ",
+    "status": "active",
+    "py": "remove_job.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json",
+      "os",
+      "pathlib"
+    ],
+    "functions": [
+      "remove_job"
+    ],
+    "hardcoded_paths": [],
+    "lines": 138
+  },
+  {
+    "id": "resume_job",
+    "dir": "resume_job",
+    "name": "Resume Job",
+    "category": "job_management",
+    "description": "Resume a failed or interrupted background job. Auto-detects the job type (medical records analysis, file organization, email processing) and dispatches to the appropriate agent. Uses the same thread_id so the agent can access checkpointed state and continue from where it left off.",
+    "semantic": "Resume a failed or interrupted background job. Supports medical records analysis, file organization, and email processing jobs. Auto-detects the job type and dispatches to the appropriate agent using the same thread_id so the agent can access checkpointed state and continue from where it left off.",
+    "status": "active",
+    "py": "resume_job.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "os",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "resume_job"
+    ],
+    "hardcoded_paths": [],
+    "lines": 172
+  },
+  {
+    "id": "search_calendar",
+    "dir": "search_calendar",
+    "name": "Search Calendar",
+    "category": "Calendar",
+    "description": "Search calendar events",
+    "semantic": "Search for calendar events by keyword",
+    "status": "active",
+    "py": "search_calendar.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "search_calendar"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 23
+  },
+  {
+    "id": "search_case",
+    "dir": "search_case",
+    "name": "Search Cases",
+    "category": "Case Queries",
+    "description": "Search case data using text matching",
+    "semantic": "Search for keywords or patterns across case files",
+    "status": "active",
+    "py": "search_case.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "search_case"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 35
+  },
+  {
+    "id": "search_case_law",
+    "dir": "search_case_law",
+    "name": "Search Case Law",
+    "category": "legal_research",
+    "description": "Search CourtListener for legal opinions by keyword, court, and date range.",
+    "semantic": "Search CourtListener for legal opinions by keyword, court, and date range.",
+    "status": "active",
+    "py": "search_case_law.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "dotenv",
+      "json",
+      "os",
+      "pathlib",
+      "requests",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "search_opinions",
+      "main"
+    ],
+    "hardcoded_paths": [
+      "~/roscoe-workspace"
+    ],
+    "lines": 205
+  },
+  {
+    "id": "semantic_scholar_search",
+    "dir": "semantic_scholar_search",
+    "name": "Semantic Scholar Search",
+    "category": "medical_research",
+    "description": "Search Semantic Scholar for academic medical papers.",
+    "semantic": "Search Semantic Scholar for academic medical papers.",
+    "status": "active",
+    "py": "semantic_scholar_search.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "certifi",
+      "json",
+      "ssl",
+      "sys",
+      "typing",
+      "urllib.error",
+      "urllib.parse",
+      "urllib.request"
+    ],
+    "functions": [
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 220
+  },
+  {
+    "id": "send_slack_message",
+    "dir": "send_slack_message",
+    "name": "Send Slack Message",
+    "category": "communication",
+    "description": "Send a message to Slack about task completion, updates, or alerts.  Use this to notify about important events like: - Task completions (medical analysis done, research complete) - Red flags or concerns discovered - Case status updates - Errors or issues requiring attention ",
+    "semantic": "Send a message to Slack about task completion, updates, or alerts.  Use this to notify about important events like: - Task completions (medical analysis done, research complete) - Red flags or concerns discovered - Case status updates - Errors or issues requiring attention ",
+    "status": "active",
+    "py": "send_slack_message.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "os",
+      "typing"
+    ],
+    "functions": [
+      "_get_slack_client",
+      "send_slack_message"
+    ],
+    "hardcoded_paths": [],
+    "lines": 86
+  },
+  {
+    "id": "settlement_calculator",
+    "dir": "settlement_calculator",
+    "name": "Settlement Calculator",
+    "category": "settlement",
+    "description": "Calculate settlement distributions (fees, medical bills, liens, net to client).",
+    "semantic": "Calculate settlement distributions (fees, medical bills, liens, net to client).",
+    "status": "active",
+    "py": "settlement_calculator.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "argparse",
+      "dataclasses",
+      "datetime",
+      "decimal",
+      "json",
+      "pathlib",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "money",
+      "calculate_settlement",
+      "format_currency",
+      "generate_markdown_statement",
+      "generate_client_summary",
+      "interactive_input",
+      "main",
+      "_cli_main"
+    ],
+    "hardcoded_paths": [],
+    "lines": 643
+  },
+  {
+    "id": "show_unread_emails",
+    "dir": "show_unread_emails",
+    "name": "Show Unread Emails",
+    "category": "Email",
+    "description": "Display unread emails from JSON backend",
+    "semantic": "Show list of unread emails with optional category filter",
+    "status": "active",
+    "py": "show_unread_emails.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "show_unread_emails"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 45
+  },
+  {
+    "id": "split_large_pdf",
+    "dir": "split_large_pdf",
+    "name": "Split Large Pdf",
+    "category": "vision",
+    "description": "Split a large PDF into 100-page chunks for multimodal analysis.  Creates a folder next to the original PDF containing chunks: - original-name/original-name-part-1.pdf (pages 1-100) - original-name/original-name-part-2.pdf (pages 101-200) - etc.  Each chunk is validated to be under 32MB (Anthropic's limit). Original file remains unchanged. ",
+    "semantic": "Split a large PDF into 100-page chunks for multimodal analysis.  Creates a folder next to the original PDF containing chunks: - original-name/original-name-part-1.pdf (pages 1-100) - original-name/original-name-part-2.pdf (pages 101-200) - etc.  Each chunk is validated to be under 32MB (Anthropic's limit). Original file remains unchanged. ",
+    "status": "active",
+    "py": "split_large_pdf.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "logging",
+      "os",
+      "pathlib",
+      "shutil"
+    ],
+    "functions": [
+      "split_large_pdf"
+    ],
+    "hardcoded_paths": [],
+    "lines": 135
+  },
+  {
+    "id": "update_calendar_event",
+    "dir": "update_calendar_event",
+    "name": "Update Calendar Event",
+    "category": "Calendar",
+    "description": "Update calendar event properties",
+    "semantic": "Modify calendar event date, title, or description",
+    "status": "active",
+    "py": "update_calendar_event.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "update_calendar_event"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 36
+  },
+  {
+    "id": "update_entity",
+    "dir": "update_entity",
+    "name": "Update Entity",
+    "category": "Knowledge Graph",
+    "description": "Update existing entity properties in JSON",
+    "semantic": "Modify existing entity properties without creating duplicates",
+    "status": "active",
+    "py": "update_entity.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "update_entity"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 51
+  },
+  {
+    "id": "update_landmark",
+    "dir": "update_landmark",
+    "name": "Update Landmark Status",
+    "category": "Workflow Management",
+    "description": "Update landmark status in workflow.json",
+    "semantic": "Mark workflow landmark as complete, in progress, or incomplete",
+    "status": "active",
+    "py": "update_landmark.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "update_landmark"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 63
+  },
+  {
+    "id": "update_statute_status",
+    "dir": "update_statute_status",
+    "name": "Update Statute Status",
+    "category": "Workflow Management",
+    "description": "Update statute of limitations status",
+    "semantic": "Mark SOL as filed, tolled, or not applicable",
+    "status": "active",
+    "py": "update_statute_status.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "json_backend_utils",
+      "sys"
+    ],
+    "functions": [
+      "update_statute_status"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 32
+  },
+  {
+    "id": "upload_file_to_slack",
+    "dir": "upload_file_to_slack",
+    "name": "Upload File To Slack",
+    "category": "communication",
+    "description": "Upload a file (report, document, etc.) to Slack.  Use this to share analysis reports, summaries, or other documents directly in Slack. ",
+    "semantic": "Upload a file (report, document, etc.) to Slack.  Use this to share analysis reports, summaries, or other documents directly in Slack. ",
+    "status": "active",
+    "py": "upload_file_to_slack.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "os",
+      "pathlib",
+      "typing"
+    ],
+    "functions": [
+      "_get_slack_client",
+      "resolve_path",
+      "upload_file_to_slack"
+    ],
+    "hardcoded_paths": [],
+    "lines": 101
+  },
+  {
+    "id": "view_pdf",
+    "dir": "view_pdf",
+    "name": "View Pdf",
+    "category": "vision",
+    "description": "View and analyze a PDF file using vision capabilities.  Converts PDF pages to images and analyzes them with a multimodal LLM, allowing the agent to \"see\" the actual PDF content including layouts, images, tables, and formatting that text extraction might miss.  This is especially useful for: - Medical records with complex formatting - Documents with tables, charts, or images - Scanned documents or forms - Verifying OCR accuracy - Understanding document layout and structure ",
+    "semantic": "View and analyze a PDF file using vision capabilities.  Converts PDF pages to images and analyzes them with a multimodal LLM, allowing the agent to \"see\" the actual PDF content including layouts, images, tables, and formatting that text extraction might miss.  This is especially useful for: - Medical records with complex formatting - Documents with tables, charts, or images - Scanned documents or forms - Verifying OCR accuracy - Understanding document layout and structure ",
+    "status": "active",
+    "py": "view_pdf.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "base64",
+      "langchain_core.messages",
+      "logging",
+      "os",
+      "pathlib",
+      "typing"
+    ],
+    "functions": [
+      "get_multimodal_llm",
+      "view_pdf"
+    ],
+    "hardcoded_paths": [],
+    "lines": 196
+  },
+  {
+    "id": "write_entity",
+    "dir": "write_entity",
+    "name": "Write Entity (JSON Backend)",
+    "category": "Knowledge Graph",
+    "description": "Create entity in case JSON files using file operations",
+    "semantic": "Add new entity to case using JSON file storage instead of graph database",
+    "status": "active",
+    "py": "write_entity.py",
+    "py_exists": true,
+    "syntax_ok": true,
+    "imports": [
+      "datetime",
+      "json",
+      "json_backend_utils",
+      "sys",
+      "typing"
+    ],
+    "functions": [
+      "write_entity"
+    ],
+    "hardcoded_paths": [
+      "/Volumes/X10 Pro/projects/Tools/_shared"
+    ],
+    "lines": 60
+  }
+]
