@@ -60,6 +60,7 @@ from .config import (
     SessionResetPolicy,  # noqa: F401 — re-exported via gateway/__init__.py
     HomeChannel,
 )
+from .conversational_memory_context import maybe_prepend_conversational_memory_context
 from .whatsapp_identity import (
     canonical_whatsapp_identifier,
     normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
@@ -1444,8 +1445,12 @@ class SessionStore:
             and not (source is not None and source.session_isolated)
         ):
             from hermes_cli.profiles import get_active_profile_name
-            return self.load_timeline_conversation(
-                profile_id=get_active_profile_name(),
+            profile_id = get_active_profile_name()
+            messages = self.load_timeline_conversation(profile_id=profile_id)
+            return maybe_prepend_conversational_memory_context(
+                messages=messages,
+                profile_id=profile_id,
+                session_id=f"profile:{profile_id}",
             )
 
         session_id = session_entry.session_id if session_entry else None
