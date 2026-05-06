@@ -1929,6 +1929,26 @@ class TestCORS:
             assert "Idempotency-Key" in resp.headers.get("Access-Control-Allow-Headers", "")
 
     @pytest.mark.asyncio
+    async def test_cors_allows_hermes_session_headers(self):
+        adapter = _make_adapter(cors_origins=["http://localhost:3000"])
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.options(
+                "/v1/chat/completions",
+                headers={
+                    "Origin": "http://localhost:3000",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": (
+                        "X-Hermes-Session-Id, X-Hermes-Use-Unified-Timeline"
+                    ),
+                },
+            )
+            allowed = resp.headers.get("Access-Control-Allow-Headers", "")
+            assert resp.status == 200
+            assert "X-Hermes-Session-Id" in allowed
+            assert "X-Hermes-Use-Unified-Timeline" in allowed
+
+    @pytest.mark.asyncio
     async def test_cors_sets_vary_origin_header(self):
         adapter = _make_adapter(cors_origins=["http://localhost:3000"])
         app = _create_app(adapter)
@@ -2204,9 +2224,11 @@ class TestSessionIdHeader:
 
 
 class TestUnifiedTimelineWiring:
-    """The api_server must route memory through the unified timeline so
-    Open WebUI shares continuity with Telegram/Discord/etc. — regardless
-    of the client's X-Hermes-Session-Id header."""
+    """API server records turns to the unified timeline.
+
+    Reading profile-wide cross-channel history is opt-in for API clients so
+    Open WebUI-style requests do not inherit unrelated Telegram/cron context.
+    """
 
     def _make_ut_adapter(self, tmp_path, monkeypatch, api_key: str = ""):
         """Build an adapter that uses a per-test SessionDB + unified timeline."""
@@ -2291,6 +2313,7 @@ class TestUnifiedTimelineWiring:
                     )
                     resp = await cli.post(
                         "/v1/chat/completions",
+                        headers={"X-Hermes-Use-Unified-Timeline": "true"},
                         json={
                             "model": "hermes-agent",
                             "messages": [
@@ -2321,6 +2344,59 @@ class TestUnifiedTimelineWiring:
             assert new_rows[1]["direction"] == "outbound"
             assert new_rows[1]["platform"] == Platform.API_SERVER.value
             assert new_rows[1]["content"] == "Your pet is Fig."
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_default_uses_request_history_not_profile_timeline(
+        self, tmp_path, monkeypatch,
+    ):
+        """Default OpenAI-compatible API calls must not pull every profile row."""
+        from gateway.unified_timeline import UnifiedTimeline
+        from gateway.session import SessionSource
+
+        adapter, db = self._make_ut_adapter(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "gateway.unified_timeline.get_active_profile_name",
+            lambda: "default",
+        )
+        try:
+            ut = UnifiedTimeline(db=db, profile_id="default")
+            h = ut.record_inbound(
+                source=SessionSource(
+                    platform=Platform.TELEGRAM, chat_id="tg1",
+                    chat_type="dm", user_id="u1", user_name="alice",
+                ),
+                content="remember: my pet's name is Fig",
+                message_id="tg-m1",
+            )
+            ut.record_outbound(turn=h, content="noted — Fig")
+
+            app = _create_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                    mock_run.return_value = (
+                        {"final_response": "ok", "messages": [], "api_calls": 1},
+                        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    )
+                    resp = await cli.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": "hermes-agent",
+                            "messages": [
+                                {"role": "user", "content": "hello"},
+                            ],
+                        },
+                    )
+                    assert resp.status == 200
+
+                    history = mock_run.call_args.kwargs["conversation_history"]
+                    assert not any("Fig" in (m.get("content") or "") for m in history)
+
+            rows_after = db.get_timeline_messages(profile_id="default")
+            assert len(rows_after) == 4
+            assert rows_after[-2]["platform"] == Platform.API_SERVER.value
+            assert rows_after[-2]["content"] == "hello"
         finally:
             db.close()
 

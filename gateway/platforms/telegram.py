@@ -859,7 +859,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 await self._app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
+                    drop_pending_updates=False,
                     error_callback=_polling_error_callback,
                 )
             
@@ -873,9 +873,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 # payload size limit.  Skill descriptions are truncated to 40
                 # chars in telegram_menu_commands() to fit 100 commands safely.
                 menu_commands, hidden_count = telegram_menu_commands(max_commands=100)
-                await self._bot.set_my_commands([
-                    BotCommand(name, desc) for name, desc in menu_commands
-                ])
+                await asyncio.wait_for(
+                    self._bot.set_my_commands([
+                        BotCommand(name, desc) for name, desc in menu_commands
+                    ]),
+                    timeout=5,
+                )
                 if hidden_count:
                     logger.info(
                         "[%s] Telegram menu: %d commands registered, %d hidden (over 100 limit). Use /commands for full list.",

@@ -193,6 +193,34 @@ class TestSessionHygieneThresholds:
         # (the gateway code checks `len(history) >= 4` before evaluating)
         assert len(history) < 4
 
+    def test_actual_tokens_ignore_message_count_hard_cap(self):
+        """When actual prompt tokens are available, message-count cap should not force compression."""
+        msg_count = 1773
+        approx_tokens = 84_358
+        compress_token_threshold = 340_000
+        token_source = "actual"
+        hard_msg_limit = 400
+
+        needs_compress = approx_tokens >= compress_token_threshold
+        if token_source == "estimated":
+            needs_compress = needs_compress or msg_count >= hard_msg_limit
+
+        assert not needs_compress
+
+    def test_estimated_tokens_still_use_message_count_hard_cap(self):
+        """When token usage is estimate-only, hard message cap remains active as a safety valve."""
+        msg_count = 1773
+        approx_tokens = 84_358
+        compress_token_threshold = 340_000
+        token_source = "estimated"
+        hard_msg_limit = 400
+
+        needs_compress = approx_tokens >= compress_token_threshold
+        if token_source == "estimated":
+            needs_compress = needs_compress or msg_count >= hard_msg_limit
+
+        assert needs_compress
+
 
 class TestSessionHygieneWarnThreshold:
     """Test the post-compression warning threshold (95% of context)."""

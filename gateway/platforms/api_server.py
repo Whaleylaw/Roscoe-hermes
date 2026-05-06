@@ -389,7 +389,10 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
+    "Access-Control-Allow-Headers": (
+        "Authorization, Content-Type, Idempotency-Key, "
+        "X-Hermes-Session-Id, X-Hermes-Use-Unified-Timeline"
+    ),
 }
 
 
@@ -536,6 +539,21 @@ def _derive_chat_session_id(
     return f"api-{digest}"
 
 
+def _conversation_stats(messages: List[Dict[str, Any]]) -> tuple[int, int]:
+    """Return (message_count, rough_content_chars) for diagnostic logging."""
+    total_chars = 0
+    for msg in messages or []:
+        content = msg.get("content", "") if isinstance(msg, dict) else ""
+        try:
+            if isinstance(content, str):
+                total_chars += len(content)
+            else:
+                total_chars += len(_normalize_chat_content(content))
+        except Exception:
+            total_chars += len(str(content))
+    return len(messages or []), total_chars
+
+
 _CRON_AVAILABLE = False
 try:
     from cron.jobs import (
@@ -594,6 +612,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # with only a PlatformConfig, so we fetch the full GatewayConfig on
         # demand.  Can be overridden by tests via ``set_gateway_config``.
         self._gateway_config: Optional[Any] = None
+        self._agent_runtime_warmup_task: Optional["asyncio.Task[None]"] = None
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -733,9 +752,7 @@ class APIServerAdapter(BasePlatformAdapter):
         """Load the active profile's unified timeline in OpenAI message format.
 
         Returns ``[]`` on any failure. The unified timeline is the single
-        source of truth for cross-channel context — every Open WebUI POST
-        (regardless of its client-side ``X-Hermes-Session-Id``) reads
-        continuity from this profile-wide log.
+        source of truth for cross-channel context when explicitly requested.
         """
         db = self._ensure_session_db()
         if db is None:
@@ -747,6 +764,19 @@ class APIServerAdapter(BasePlatformAdapter):
             logger.warning("Failed to load unified timeline history: %s", e)
             return []
         return _timeline_rows_to_openai_messages(rows)
+
+    def _request_wants_unified_timeline_context(self, request: "web.Request") -> bool:
+        """Return True when an API client explicitly opts into profile history.
+
+        API clients such as Open WebUI already send their own conversation
+        history. Pulling the whole profile-wide timeline implicitly makes tiny
+        requests inherit Telegram/cron/Slack history and can balloon one-line
+        turns into tens of thousands of prompt tokens. We still record API
+        turns into the unified timeline, but reading that cross-channel history
+        is opt-in for API calls.
+        """
+        value = request.headers.get("X-Hermes-Use-Unified-Timeline", "")
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
     def _record_inbound_timeline(
         self, *, session_id: str, user_message: Any, request: "web.Request",
@@ -868,6 +898,7 @@ class APIServerAdapter(BasePlatformAdapter):
         from gateway.run import GatewayRunner
         fallback_model = GatewayRunner._load_fallback_model()
 
+        start = time.monotonic()
         agent = AIAgent(
             model=model,
             **runtime_kwargs,
@@ -884,8 +915,83 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_complete_callback=tool_complete_callback,
             session_db=self._ensure_session_db(),
             fallback_model=fallback_model,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        logger.info(
+            "[Api_Server] agent created session=%s model=%s provider=%s toolsets=%s elapsed=%.1fs",
+            session_id,
+            model,
+            runtime_kwargs.get("provider"),
+            ",".join(enabled_toolsets),
+            time.monotonic() - start,
         )
         return agent
+
+    def _schedule_agent_runtime_warmup(self) -> None:
+        """Warm heavy imports/config after the listener is online.
+
+        The API server binds early so health checks and web clients can connect
+        before Telegram/Slack finish startup.  Without this warmup, the first
+        chat request pays the full import/config-discovery cost for run_agent
+        and provider routing, which is especially visible when the machine is
+        under filesystem pressure.
+        """
+        task = self._agent_runtime_warmup_task
+        if task is not None and not task.done():
+            return
+        try:
+            task = asyncio.create_task(self._warm_agent_runtime())
+            self._agent_runtime_warmup_task = task
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+        except Exception as exc:
+            logger.debug("[Api_Server] failed to schedule agent runtime warmup: %s", exc)
+
+    async def _warm_agent_runtime(self) -> None:
+        loop = asyncio.get_running_loop()
+
+        def _warm() -> None:
+            start = time.monotonic()
+            from run_agent import AIAgent  # noqa: F401
+            from gateway.run import (  # noqa: F401
+                GatewayRunner,
+                _load_gateway_config,
+                _resolve_gateway_model,
+                _resolve_runtime_agent_kwargs,
+            )
+            from hermes_cli.tools_config import _get_platform_tools
+
+            runtime_kwargs = _resolve_runtime_agent_kwargs()
+            model = _resolve_gateway_model()
+            user_config = _load_gateway_config()
+            enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+            fallback_model = GatewayRunner._load_fallback_model()
+            logger.info(
+                "[Api_Server] agent runtime warmup complete model=%s provider=%s "
+                "toolsets=%s fallback=%s elapsed=%.1fs",
+                model,
+                runtime_kwargs.get("provider"),
+                ",".join(enabled_toolsets),
+                bool(fallback_model),
+                time.monotonic() - start,
+            )
+
+        try:
+            await loop.run_in_executor(None, _warm)
+        except Exception as exc:
+            logger.warning("[Api_Server] agent runtime warmup failed: %s", exc, exc_info=True)
+
+    async def _wait_for_agent_runtime_warmup(self) -> None:
+        task = self._agent_runtime_warmup_task
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.shield(task)
+        except Exception:
+            # The warmup path is an optimization only; _create_agent can still
+            # import/resolve synchronously in the worker thread if warmup fails.
+            pass
 
     # ------------------------------------------------------------------
     # HTTP Handlers
@@ -939,6 +1045,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
+        request_start = time.monotonic()
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -1001,6 +1108,9 @@ class APIServerAdapter(BasePlatformAdapter):
         # for the legacy (unified_timeline disabled) continuation path.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
         unified_enabled = self._unified_timeline_enabled()
+        use_unified_context = (
+            unified_enabled and self._request_wants_unified_timeline_context(request)
+        )
 
         if provided_session_id:
             if not self._api_key:
@@ -1023,7 +1133,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=400,
                 )
             session_id = provided_session_id
-            if unified_enabled:
+            if use_unified_context:
                 history = self._load_unified_timeline_history()
             else:
                 try:
@@ -1044,13 +1154,29 @@ class APIServerAdapter(BasePlatformAdapter):
                     first_user = cm.get("content", "")
                     break
             session_id = _derive_chat_session_id(system_prompt, first_user)
-            if unified_enabled:
-                # Unified timeline is the single source of truth for
-                # cross-channel continuity — the request body's own
-                # conversation history is discarded in favor of the
-                # profile-wide log that Telegram, Discord, etc. share.
+            if use_unified_context:
+                # Explicit opt-in only. Default API behavior keeps the
+                # request body's own conversation history so web clients do
+                # not inherit unrelated Telegram/cron/Slack turns.
                 history = self._load_unified_timeline_history()
             # else: history already set from request body above
+
+        history_count, history_chars = _conversation_stats(history)
+        user_chars = len(_normalize_chat_content(user_message))
+        logger.info(
+            "[Api_Server] chat request session=%s stream=%s provided_session=%s "
+            "unified_enabled=%s unified_context=%s history_msgs=%d history_chars=%d "
+            "user_chars=%d parse_elapsed=%.1fs",
+            session_id,
+            bool(stream),
+            bool(provided_session_id),
+            bool(unified_enabled),
+            bool(use_unified_context),
+            history_count,
+            history_chars,
+            user_chars,
+            time.monotonic() - request_start,
+        )
 
         # Record the inbound turn on the unified timeline (if enabled) so
         # the agent's reply can be appended when it arrives.
@@ -1080,35 +1206,78 @@ class APIServerAdapter(BasePlatformAdapter):
                     _stream_q.put(delta)
 
             def _on_tool_progress(event_type, name, preview, args, **kwargs):
-                """Send tool progress as a separate SSE event.
+                """Send tool progress as both a custom SSE event and an
+                OpenWebUI-renderable ``<details type="reasoning">`` block.
 
-                Previously, progress markers like ``⏰ list`` were injected
-                directly into ``delta.content``.  OpenAI-compatible frontends
-                (Open WebUI, LobeChat, …) store ``delta.content`` verbatim as
-                the assistant message and send it back on subsequent requests.
-                After enough turns the model learns to *emit* the markers as
-                plain text instead of issuing real tool calls — silently
-                hallucinating tool results.  See #6972.
+                Two parallel emissions per event:
 
-                The fix: push a tagged tuple ``("__tool_progress__", payload)``
-                onto the stream queue.  The SSE writer emits it as a custom
-                ``event: hermes.tool.progress`` line that compliant frontends
-                can render for UX but will *not* persist into conversation
-                history.  Clients that don't understand the custom event type
-                silently ignore it per the SSE specification.
+                1. Tagged tuple ``("__tool_progress__", payload)`` -> the SSE
+                   writer turns it into a custom ``event: hermes.tool.progress``
+                   line.  Frontends that understand it (TUI, custom UIs) render
+                   it; clients that don't understand the event type ignore it
+                   per the SSE spec.  This payload never lands in
+                   ``delta.content``, so it cannot be round-tripped back into
+                   the next turn's prompt.  See #6972.
+
+                2. ``<details type="reasoning">`` block pushed as a normal text
+                   chunk.  Open WebUI renders these as collapsible panels
+                   live (src/lib/utils/marked/extension.ts) and strips them
+                   from message history before sending the next request
+                   (src/lib/utils/index.ts ``removeAllDetails`` -> called from
+                   Chat.svelte).  So OWUI users see what tool is firing AND
+                   the model never sees the markers on subsequent turns —
+                   sidestepping #6972.  Clients that don't render <details>
+                   will display the raw tag inline (mildly ugly, not broken).
                 """
-                if event_type != "tool.started":
+                if event_type == "status.update":
+                    label = preview or name
+                    summary = f"⏳ {label}"
+                    block = (
+                        f"\n<details type=\"reasoning\" done=\"false\">\n"
+                        f"<summary>{summary}</summary>\n</details>\n"
+                    )
+                    _stream_q.put(("__tool_progress__", {
+                        "event": event_type, "stage": name, "label": label,
+                    }))
+                    _stream_q.put(block)
                     return
+
                 if name.startswith("_"):
+                    return
+                if event_type not in ("tool.started", "tool.completed"):
                     return
                 from agent.display import get_tool_emoji
                 emoji = get_tool_emoji(name)
                 label = preview or name
+
                 _stream_q.put(("__tool_progress__", {
+                    "event": event_type,
                     "tool": name,
                     "emoji": emoji,
                     "label": label,
+                    "duration": kwargs.get("duration"),
+                    "is_error": kwargs.get("is_error", False),
                 }))
+
+                if event_type == "tool.started":
+                    summary = f"{emoji} {label}"
+                    block = (
+                        f"\n<details type=\"reasoning\" done=\"false\">\n"
+                        f"<summary>{summary}</summary>\nrunning…\n</details>\n"
+                    )
+                else:
+                    is_error = kwargs.get("is_error", False)
+                    duration = kwargs.get("duration")
+                    status_emoji = "❌" if is_error else "✓"
+                    parts = [status_emoji, name]
+                    if isinstance(duration, (int, float)):
+                        parts.append(f"({duration:.2f}s)")
+                    summary = " ".join(parts)
+                    block = (
+                        f"\n<details type=\"reasoning\" done=\"true\">\n"
+                        f"<summary>{summary}</summary>\n</details>\n"
+                    )
+                _stream_q.put(block)
 
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
@@ -1203,6 +1372,17 @@ class APIServerAdapter(BasePlatformAdapter):
         # Record the agent's reply on the unified timeline before returning.
         self._record_outbound_timeline(
             turn_handle=turn_handle, content=final_response or "",
+        )
+
+        logger.info(
+            "[Api_Server] chat response session=%s elapsed=%.1fs prompt_tokens=%s "
+            "completion_tokens=%s total_tokens=%s response_chars=%d",
+            session_id,
+            time.monotonic() - request_start,
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            usage.get("total_tokens", 0),
+            len(final_response or ""),
         )
 
         return web.json_response(response_data, headers={"X-Hermes-Session-Id": session_id})
@@ -2436,9 +2616,18 @@ class APIServerAdapter(BasePlatformAdapter):
         callers (e.g. the SSE writer) to call ``agent.interrupt()`` from
         another thread to stop in-progress LLM calls.
         """
+        await self._wait_for_agent_runtime_warmup()
         loop = asyncio.get_running_loop()
 
         def _run():
+            run_start = time.monotonic()
+            history_count, history_chars = _conversation_stats(conversation_history)
+            logger.info(
+                "[Api_Server] run start session=%s history_msgs=%d history_chars=%d",
+                session_id,
+                history_count,
+                history_chars,
+            )
             agent = self._create_agent(
                 ephemeral_system_prompt=ephemeral_system_prompt,
                 session_id=session_id,
@@ -2459,6 +2648,15 @@ class APIServerAdapter(BasePlatformAdapter):
                 "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                 "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
             }
+            logger.info(
+                "[Api_Server] run complete session=%s elapsed=%.1fs prompt_tokens=%s "
+                "completion_tokens=%s total_tokens=%s",
+                session_id,
+                time.monotonic() - run_start,
+                usage["input_tokens"],
+                usage["output_tokens"],
+                usage["total_tokens"],
+            )
             return result, usage
 
         return await loop.run_in_executor(None, _run)
@@ -2611,13 +2809,13 @@ class APIServerAdapter(BasePlatformAdapter):
 
         async def _run_and_close():
             try:
-                agent = self._create_agent(
-                    ephemeral_system_prompt=ephemeral_system_prompt,
-                    session_id=session_id,
-                    stream_delta_callback=_text_cb,
-                    tool_progress_callback=event_cb,
-                )
                 def _run_sync():
+                    agent = self._create_agent(
+                        ephemeral_system_prompt=ephemeral_system_prompt,
+                        session_id=session_id,
+                        stream_delta_callback=_text_cb,
+                        tool_progress_callback=event_cb,
+                    )
                     r = agent.run_conversation(
                         user_message=user_message,
                         conversation_history=conversation_history,
@@ -2828,6 +3026,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "[%s] API server listening on http://%s:%d (model: %s)",
                 self.name, self._host, self._port, self._model_name,
             )
+            self._schedule_agent_runtime_warmup()
             return True
 
         except Exception as e:

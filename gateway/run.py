@@ -2169,8 +2169,15 @@ class GatewayRunner:
         startup_nonretryable_errors: list[str] = []
         startup_retryable_errors: list[str] = []
         
-        # Initialize and connect each configured platform
-        for platform, platform_config in self.config.platforms.items():
+        # Initialize and connect each configured platform.  Bring the local
+        # API server up first so web UI clients are not blocked by slow remote
+        # messaging handshakes (Telegram command registration, Slack socket
+        # reconnects, etc.).
+        platform_items = sorted(
+            self.config.platforms.items(),
+            key=lambda item: 0 if item[0] == Platform.API_SERVER else 1,
+        )
+        for platform, platform_config in platform_items:
             if not platform_config.enabled:
                 continue
             enabled_platform_count += 1
@@ -4505,18 +4512,22 @@ class GatewayRunner:
                     # 85% * 1.4 = 119% of context — which exceeds the model's limit
                     # and prevented hygiene from ever firing for ~200K models (GLM-5).
 
-                # Hard safety valve: force compression if message count is
-                # extreme, regardless of token estimates.  This breaks the
-                # death spiral where API disconnects prevent token data
-                # collection, which prevents compression, which causes more
-                # disconnects.  400 messages is well above normal sessions
-                # but catches runaway growth before it becomes unrecoverable.
-                # (#2153)
+                # Hard safety valve: force compression on extreme message
+                # counts ONLY when we do not have actual prompt-token usage.
+                #
+                # Why: with healthy API usage we usually have
+                # session_entry.last_prompt_tokens (actual). In that case,
+                # token thresholds are more reliable than message counts and
+                # we should not compress merely because a long-lived chat has
+                # many short turns.
+                #
+                # Keep the hard cap for estimate-only mode to break the
+                # disconnect spiral where token data is unavailable and
+                # transcript growth can run away. (#2153)
                 _HARD_MSG_LIMIT = 400
-                _needs_compress = (
-                    _approx_tokens >= _compress_token_threshold
-                    or _msg_count >= _HARD_MSG_LIMIT
-                )
+                _needs_compress = _approx_tokens >= _compress_token_threshold
+                if _token_source == "estimated":
+                    _needs_compress = _needs_compress or _msg_count >= _HARD_MSG_LIMIT
 
                 if _needs_compress:
                     logger.info(
@@ -9857,9 +9868,19 @@ class GatewayRunner:
             # `_resolve_turn_agent_config(message, …)`.
             nonlocal message
 
-            # session_key is now set via contextvars in _set_session_env()
-            # (concurrency-safe). Keep os.environ as fallback for CLI/cron.
+            # session context is set via contextvars in _set_session_env()
+            # (concurrency-safe). We also mirror these fields into os.environ
+            # for the agent subprocess path so request-time metadata injection
+            # can read full source details (not just session key).
             os.environ["HERMES_SESSION_KEY"] = session_key or ""
+            os.environ["HERMES_SESSION_PLATFORM"] = source.platform.value if source and source.platform else ""
+            os.environ["HERMES_SESSION_CHAT_ID"] = source.chat_id or ""
+            os.environ["HERMES_SESSION_CHAT_NAME"] = source.chat_name or ""
+            os.environ["HERMES_SESSION_THREAD_ID"] = str(source.thread_id) if source and source.thread_id else ""
+            os.environ["HERMES_SESSION_USER_ID"] = str(source.user_id) if source and source.user_id else ""
+            os.environ["HERMES_SESSION_USER_NAME"] = str(source.user_name) if source and source.user_name else ""
+            os.environ["HERMES_CHANNEL_CWD"] = channel_cwd or ""
+            os.environ["HERMES_SESSION_ISOLATED"] = "true" if getattr(source, "session_isolated", False) else "false"
 
             # Read from env var or use default (same as CLI)
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
@@ -10058,6 +10079,7 @@ class GatewayRunner:
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
+                    context_cwd=channel_cwd,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
@@ -11257,10 +11279,19 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             )
             return False
 
-    # Sync bundled skills on gateway start (fast -- skips unchanged)
+    # Sync bundled skills on first gateway start only.  A full sync hashes the
+    # bundled skill tree and the user's installed copies; doing that on every
+    # service restart can delay the API listener by minutes on large/contended
+    # filesystems.  Update/install flows still run the full sync explicitly.
     try:
-        from tools.skills_sync import sync_skills
-        sync_skills(quiet=True)
+        from tools import skills_sync
+        if not skills_sync.MANIFEST_FILE.exists():
+            skills_sync.sync_skills(quiet=True)
+        else:
+            logger.debug(
+                "Skipping bundled skills sync on gateway start; manifest exists at %s",
+                skills_sync.MANIFEST_FILE,
+            )
     except Exception:
         pass
 

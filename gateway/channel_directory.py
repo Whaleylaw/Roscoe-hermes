@@ -137,20 +137,83 @@ def _build_discord(adapter) -> List[Dict[str, str]]:
 
 
 def _build_slack(adapter) -> List[Dict[str, str]]:
-    """List Slack channels the bot has joined."""
-    # Slack adapter may expose a web client
-    client = getattr(adapter, "_app", None) or getattr(adapter, "_client", None)
-    if not client:
+    """List every Slack channel the bot is a member of, across all workspaces.
+
+    Uses the bot tokens registered on the adapter (one per workspace) to call
+    ``users.conversations`` synchronously — that endpoint returns only the
+    channels the bot has actually been invited to, which is exactly what
+    ``send_message`` needs for name resolution. Falls back to session-derived
+    entries if the adapter has no clients yet (e.g. still connecting) or if
+    the Web API call fails.
+    """
+    team_clients = getattr(adapter, "_team_clients", None) or {}
+    if not team_clients:
         return _build_from_sessions("slack")
 
-    try:
-        from tools.send_message_tool import _send_slack  # noqa: F401
-        # Use the Slack Web API directly if available
-    except Exception:
-        pass
+    channels: List[Dict[str, str]] = []
+    seen_ids = set()
+    for team_id, client in team_clients.items():
+        token = getattr(client, "token", None)
+        if not token:
+            continue
+        try:
+            for ch in _list_slack_channels(token):
+                ch_id = ch.get("id")
+                if not ch_id or ch_id in seen_ids:
+                    continue
+                seen_ids.add(ch_id)
+                channels.append({
+                    "id": ch_id,
+                    "name": ch.get("name", ch_id),
+                    "type": "channel",
+                    "team_id": team_id,
+                })
+        except Exception as e:
+            logger.warning(
+                "Channel directory: Slack conversations.list failed for team %s: %s",
+                team_id, e,
+            )
 
-    # Fallback to session data
-    return _build_from_sessions("slack")
+    # Merge in DM-derived entries from session history (im channels aren't
+    # returned by users.conversations unless the bot opted into im scopes).
+    for entry in _build_from_sessions("slack"):
+        if entry.get("id") not in seen_ids:
+            channels.append(entry)
+            seen_ids.add(entry.get("id"))
+
+    return channels
+
+
+def _list_slack_channels(token: str, page_limit: int = 1000) -> List[Dict[str, Any]]:
+    """Paginate ``users.conversations`` synchronously via stdlib urllib.
+
+    Called from ``build_channel_directory``, which already runs inside an
+    asyncio loop — using a sync HTTP client avoids re-entering the loop.
+    """
+    import urllib.parse
+    import urllib.request
+
+    results: List[Dict[str, Any]] = []
+    cursor = ""
+    while True:
+        params = {
+            "types": "public_channel,private_channel",
+            "exclude_archived": "true",
+            "limit": "1000",
+        }
+        if cursor:
+            params["cursor"] = cursor
+        url = "https://slack.com/api/users.conversations?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if not data.get("ok"):
+            raise RuntimeError(data.get("error", "unknown"))
+        results.extend(data.get("channels") or [])
+        cursor = (data.get("response_metadata") or {}).get("next_cursor") or ""
+        if not cursor or len(results) >= page_limit * 10:
+            break
+    return results
 
 
 def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:

@@ -1262,6 +1262,11 @@ class SlackAdapter(BasePlatformAdapter):
         )
         if _channel_cwd:
             source.session_isolated = True
+            # Case-scoped channels should keep a single per-case transcript.
+            # Do not split session history by Slack thread_ts inside these
+            # channels; users often reply in-thread while expecting the same
+            # case context.
+            source.thread_id = None
 
         msg_event = MessageEvent(
             text=text,
