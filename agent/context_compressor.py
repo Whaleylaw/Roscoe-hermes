@@ -61,7 +61,50 @@ _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 
 # Chars per token rough estimate
 _CHARS_PER_TOKEN = 4
+# Flat token cost per attached image part.  Real cost varies by provider and
+# dimensions (Anthropic ≈ width×height/750, GPT-4o up to ~1700 for
+# high-detail 2048×2048, Gemini 258/tile), but 1600 is a realistic ceiling
+# that keeps compression budgeting honest for multi-image conversations.
+# Matches Claude Code's IMAGE_TOKEN_ESTIMATE constant.
+_IMAGE_TOKEN_ESTIMATE = 1600
+# Same figure expressed in the char-budget currency the rest of the
+# compressor speaks in.  Used when accumulating message "content length"
+# for tail-cut decisions.
+_IMAGE_CHAR_EQUIVALENT = _IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
 _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
+
+
+def _content_length_for_budget(raw_content: Any) -> int:
+    """Return the effective char-length of a message's content for token budgeting.
+
+    Plain strings: ``len(content)``. Multimodal lists: sum of text-part
+    ``len(text)`` plus a flat ``_IMAGE_CHAR_EQUIVALENT`` per image part
+    (``image_url`` / ``input_image`` / Anthropic-style ``image``). This
+    keeps the compressor from treating a turn with 5 attached images as
+    near-zero tokens just because the text part is empty.
+    """
+    if isinstance(raw_content, str):
+        return len(raw_content)
+    if not isinstance(raw_content, list):
+        return len(str(raw_content or ""))
+
+    total = 0
+    for p in raw_content:
+        if isinstance(p, str):
+            total += len(p)
+            continue
+        if not isinstance(p, dict):
+            total += len(str(p))
+            continue
+        ptype = p.get("type")
+        if ptype in {"image_url", "input_image", "image"}:
+            total += _IMAGE_CHAR_EQUIVALENT
+        else:
+            # text / input_text / tool_result-with-text / anything else with
+            # a text field.  Ignore the raw base64 payload inside image_url
+            # dicts — dimensions don't matter, only whether it's an image.
+            total += len(p.get("text", "") or "")
+    return total
 
 
 def _content_text_for_contains(content: Any) -> str:
@@ -294,8 +337,14 @@ class ContextCompressor(ContextEngine):
         self._context_probed = False
         self._context_probe_persistable = False
         self._previous_summary = None
+        self._last_summary_error = None
+        self._last_summary_dropped_count = 0
+        self._last_summary_fallback_used = False
+        self._last_aux_model_failure_error = None
+        self._last_aux_model_failure_model = None
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
+        self._summary_failure_cooldown_until = 0.0  # transient errors must not block a fresh session
 
     def update_model(
         self,
@@ -316,6 +365,13 @@ class ContextCompressor(ContextEngine):
         self.threshold_tokens = max(
             int(context_length * self.threshold_percent),
             MINIMUM_CONTEXT_LENGTH,
+        )
+        # Recalculate token budgets for the new context length so the
+        # compressor stays calibrated after a model switch (e.g. 200K → 32K).
+        target_tokens = int(self.threshold_tokens * self.summary_target_ratio)
+        self.tail_token_budget = target_tokens
+        self.max_summary_tokens = min(
+            int(context_length * 0.05), _SUMMARY_TOKENS_CEILING,
         )
 
     def __init__(
@@ -389,6 +445,18 @@ class ContextCompressor(ContextEngine):
         self._last_compression_savings_pct: float = 100.0
         self._ineffective_compression_count: int = 0
         self._summary_failure_cooldown_until: float = 0.0
+        self._last_summary_error: Optional[str] = None
+        # When summary generation fails and a static fallback is inserted,
+        # record how many turns were unrecoverably dropped so callers
+        # (gateway hygiene, /compress) can surface a visible warning.
+        self._last_summary_dropped_count: int = 0
+        self._last_summary_fallback_used: bool = False
+        # When a user-configured summary model fails and we recover by
+        # retrying on the main model, record the failure so gateway /
+        # CLI callers can still warn the user even though compression
+        # succeeded.  Silent recovery would hide the broken config.
+        self._last_aux_model_failure_error: Optional[str] = None
+        self._last_aux_model_failure_model: Optional[str] = None
 
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
@@ -471,11 +539,11 @@ class ContextCompressor(ContextEngine):
             # Token-budget approach: walk backward accumulating tokens
             accumulated = 0
             boundary = len(result)
-            min_protect = min(protect_tail_count, len(result) - 1)
+            min_protect = min(protect_tail_count, len(result))
             for i in range(len(result) - 1, -1, -1):
                 msg = result[i]
                 raw_content = msg.get("content") or ""
-                content_len = sum(len(p.get("text", "")) for p in raw_content) if isinstance(raw_content, list) else len(raw_content)
+                content_len = _content_length_for_budget(raw_content)
                 msg_tokens = content_len // _CHARS_PER_TOKEN + 10
                 for tc in msg.get("tool_calls") or []:
                     if isinstance(tc, dict):
@@ -486,7 +554,16 @@ class ContextCompressor(ContextEngine):
                     break
                 accumulated += msg_tokens
                 boundary = i
-            prune_boundary = max(boundary, len(result) - min_protect)
+            # Translate the budget walk into a "protected count", apply the
+            # floor in count-space (where `max` reads naturally: protect at
+            # least `min_protect` messages or whatever the budget reserved,
+            # whichever is more), then convert back to a prune boundary.
+            # Doing this in index-space with `max` would invert the direction
+            # (smaller index = MORE protected), so a generous budget would
+            # silently get truncated back down to `min_protect`.
+            budget_protect_count = len(result) - boundary
+            protected_count = max(budget_protect_count, min_protect)
+            prune_boundary = len(result) - protected_count
         else:
             prune_boundary = len(result) - protect_tail_count
 
@@ -501,6 +578,8 @@ class ContextCompressor(ContextEngine):
             content = msg.get("content") or ""
             # Skip multimodal content (list of content blocks)
             if isinstance(content, list):
+                continue
+            if not isinstance(content, str):
                 continue
             if len(content) < 200:
                 continue
@@ -520,6 +599,8 @@ class ContextCompressor(ContextEngine):
             content = msg.get("content", "")
             # Skip multimodal content (list of content blocks)
             if isinstance(content, list):
+                continue
+            if not isinstance(content, str):
                 continue
             if not content or content == _PRUNED_TOOL_PLACEHOLDER:
                 continue
@@ -769,7 +850,6 @@ Target ~{summary_budget} tokens. Be CONCRETE — include file paths, command out
 Write only the summary body. Do not include any preamble or prefix."""
 
         turns_for_attempt = list(turns_to_summarize)
-        max_attempts = 4
         min_turns_to_keep = 8
 
         # Proactive token-based pre-shrink: avoid burning discovery round-trips
@@ -795,38 +875,37 @@ Write only the summary body. Do not include any preamble or prefix."""
                 self._SUMMARY_INPUT_TARGET_TOKENS,
             )
 
-        for attempt in range(max_attempts):
-            summary_budget = self._compute_summary_budget(turns_for_attempt)
+        summary_budget = self._compute_summary_budget(turns_for_attempt)
+        content_to_summarize = self._serialize_for_summary(turns_for_attempt)
+
+        # Provider guardrail: keep the serialized input bounded by characters,
+        # not just tokens. Some APIs reject oversized message strings before
+        # tokenization (e.g., string_above_max_length).
+        while (
+            len(content_to_summarize) > self._SUMMARY_INPUT_MAX_CHARS
+            and len(turns_for_attempt) > min_turns_to_keep
+        ):
+            new_len = max(min_turns_to_keep, int(len(turns_for_attempt) * 0.7))
+            if new_len >= len(turns_for_attempt):
+                break
+            turns_for_attempt = turns_for_attempt[-new_len:]
             content_to_summarize = self._serialize_for_summary(turns_for_attempt)
 
-            # Provider guardrail: keep the serialized input bounded by characters,
-            # not just tokens. Some APIs reject oversized message strings before
-            # tokenization (e.g., string_above_max_length).
-            while (
-                len(content_to_summarize) > self._SUMMARY_INPUT_MAX_CHARS
-                and len(turns_for_attempt) > min_turns_to_keep
-            ):
-                new_len = max(min_turns_to_keep, int(len(turns_for_attempt) * 0.7))
-                if new_len >= len(turns_for_attempt):
-                    break
-                turns_for_attempt = turns_for_attempt[-new_len:]
-                content_to_summarize = self._serialize_for_summary(turns_for_attempt)
+        # If we still exceed the limit (e.g., few giant turns), clip by chars
+        # so the request can still go through.
+        content_to_summarize = self._clip_middle(
+            content_to_summarize,
+            self._SUMMARY_INPUT_MAX_CHARS,
+        )
 
-            # If we still exceed the limit (e.g., few giant turns), clip by chars
-            # so the request can still go through.
-            content_to_summarize = self._clip_middle(
-                content_to_summarize,
-                self._SUMMARY_INPUT_MAX_CHARS,
-            )
+        previous_summary_for_prompt = self._clip_middle(
+            self._previous_summary,
+            self._PREVIOUS_SUMMARY_MAX_CHARS,
+        ) if self._previous_summary else ""
 
-            previous_summary_for_prompt = self._clip_middle(
-                self._previous_summary,
-                self._PREVIOUS_SUMMARY_MAX_CHARS,
-            ) if self._previous_summary else ""
-
-            if self._previous_summary:
-                # Iterative update: preserve existing info, add new progress
-                prompt = f"""{_summarizer_preamble}
+        if self._previous_summary:
+            # Iterative update: preserve existing info, add new progress
+            prompt = f"""{_summarizer_preamble}
 
 You are updating a context compaction summary. A previous compaction produced the summary below. New conversation turns have occurred since then and need to be incorporated.
 
@@ -839,9 +918,9 @@ NEW TURNS TO INCORPORATE:
 Update the summary using this exact structure. PRESERVE all existing information that is still relevant. ADD new completed actions to the numbered list (continue numbering). Move items from "In Progress" to "Completed Actions" when done. Move answered questions to "Resolved Questions". Update "Active State" to reflect current state. Remove information only if it is clearly obsolete. CRITICAL: Update "## Active Task" to reflect the user's most recent unfulfilled request — this is the most important field for task continuity.
 
 {_template_sections.format(summary_budget=summary_budget)}"""
-            else:
-                # First compaction: summarize from scratch
-                prompt = f"""{_summarizer_preamble}
+        else:
+            # First compaction: summarize from scratch
+            prompt = f"""{_summarizer_preamble}
 
 Create a structured handoff summary for a different assistant that will continue this conversation after earlier turns are compacted. The next assistant should be able to understand what happened without re-reading the original turns.
 
@@ -852,141 +931,160 @@ Use this exact structure:
 
 {_template_sections.format(summary_budget=summary_budget)}"""
 
-            # Inject focus topic guidance when the user provides one via /compress <focus>.
-            # This goes at the end of the prompt so it takes precedence.
-            if focus_topic:
-                prompt += f"""
+        # Inject focus topic guidance when the user provides one via /compress <focus>.
+        # This goes at the end of the prompt so it takes precedence.
+        if focus_topic:
+            prompt += f"""
 
 FOCUS TOPIC: "{focus_topic}"
 The user has requested that this compaction PRIORITISE preserving all information related to the focus topic above. For content related to "{focus_topic}", include full detail — exact values, file paths, command outputs, error messages, and decisions. For content NOT related to the focus topic, summarise more aggressively (brief one-liners or omit if truly irrelevant). The focus topic sections should receive roughly 60-70% of the summary token budget. Even for the focus topic, NEVER preserve API keys, tokens, passwords, or credentials — use [REDACTED]."""
 
-            try:
-                call_kwargs = {
-                    "task": "compression",
-                    "main_runtime": {
-                        "model": self.model,
-                        "provider": self.provider,
-                        "base_url": self.base_url,
-                        "api_key": self.api_key,
-                        "api_mode": self.api_mode,
-                    },
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": int(summary_budget * 1.3),
-                    # timeout resolved from auxiliary.compression.timeout config by call_llm
-                }
-                if self.summary_model:
-                    call_kwargs["model"] = self.summary_model
-                response = call_llm(**call_kwargs)
-                content = response.choices[0].message.content
-                # Handle cases where content is not a string (e.g., dict from llama.cpp)
-                if not isinstance(content, str):
-                    content = str(content) if content else ""
-                # Redact the summary output — the summarizer LLM may
-                # ignore prompt instructions and echo back secrets verbatim.
-                summary = redact_sensitive_text(content.strip())
-                # Store for iterative updates on next compaction
-                self._previous_summary = summary
-                self._summary_failure_cooldown_until = 0.0
-                self._summary_model_fallen_back = False
-                return self._with_summary_prefix(summary)
-            except RuntimeError:
-                # No provider configured — long cooldown, unlikely to self-resolve
-                self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
-                logging.warning("Context compression: no provider available for "
-                                "summary. Middle turns will be dropped without summary "
-                                "for %d seconds.",
-                                _SUMMARY_FAILURE_COOLDOWN_SECONDS)
-                return None
-            except Exception as e:
-                # If the summary model is different from the main model and the
-                # error looks permanent (model not found, 503, 404), fall back to
-                # using the main model instead of entering cooldown that leaves
-                # context growing unbounded.  (#8620 sub-issue 4)
-                _status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
-                _err_str = str(e).lower()
-                _is_model_not_found = (
-                    _status in (404, 503)
-                    or "model_not_found" in _err_str
-                    or "does not exist" in _err_str
-                    or "no available channel" in _err_str
-                )
-                if (
-                    _is_model_not_found
-                    and self.summary_model
-                    and self.summary_model != self.model
-                    and not getattr(self, "_summary_model_fallen_back", False)
-                ):
-                    self._summary_model_fallen_back = True
-                    logging.warning(
-                        "Summary model '%s' not available (%s). "
-                        "Falling back to main model '%s' for compression.",
-                        self.summary_model, e, self.model,
-                    )
-                    self.summary_model = ""  # empty = use main model
-                    self._summary_failure_cooldown_until = 0.0  # no cooldown
-                    continue
-
-                # Context-window errors are often recoverable by summarizing a
-                # smaller middle slice. Keep the newest turns (most relevant)
-                # and retry a few times before falling back.
-                _is_context_window_error = (
-                    "context window" in _err_str
-                    or "maximum context length" in _err_str
-                    or "prompt is too long" in _err_str
-                    or "input exceeds" in _err_str
-                    or "too many tokens" in _err_str
-                    or "context_length_exceeded" in _err_str
-                    or "string_above_max_length" in _err_str
-                    or "maximum length" in _err_str
-                    or "request too large" in _err_str
-                    or "payload too large" in _err_str
-                )
-                if _is_context_window_error and len(turns_for_attempt) > min_turns_to_keep:
-                    new_len = max(min_turns_to_keep, int(len(turns_for_attempt) * 0.6))
-                    if new_len < len(turns_for_attempt):
-                        logging.warning(
-                            "Context summary input exceeded model window (%s). "
-                            "Retrying with newest %d/%d turns (attempt %d/%d).",
-                            e,
-                            new_len,
-                            len(turns_for_attempt),
-                            attempt + 1,
-                            max_attempts,
-                        )
-                        turns_for_attempt = turns_for_attempt[-new_len:]
-                        continue
-
-                # Transient errors (timeout, rate limit, network) — shorter cooldown
-                _transient_cooldown = 60
-                self._summary_failure_cooldown_until = time.monotonic() + _transient_cooldown
+        try:
+            call_kwargs = {
+                "task": "compression",
+                "main_runtime": {
+                    "model": self.model,
+                    "provider": self.provider,
+                    "base_url": self.base_url,
+                    "api_key": self.api_key,
+                    "api_mode": self.api_mode,
+                },
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": int(summary_budget * 1.3),
+                # timeout resolved from auxiliary.compression.timeout config by call_llm
+            }
+            if self.summary_model:
+                call_kwargs["model"] = self.summary_model
+            response = call_llm(**call_kwargs)
+            content = response.choices[0].message.content
+            # Handle cases where content is not a string (e.g., dict from llama.cpp)
+            if not isinstance(content, str):
+                content = str(content) if content else ""
+            # Redact the summary output as well — the summarizer LLM may
+            # ignore prompt instructions and echo back secrets verbatim.
+            summary = redact_sensitive_text(content.strip())
+            # Store for iterative updates on next compaction
+            self._previous_summary = summary
+            self._summary_failure_cooldown_until = 0.0
+            self._summary_model_fallen_back = False
+            self._last_summary_error = None
+            return self._with_summary_prefix(summary)
+        except RuntimeError:
+            # No provider configured — long cooldown, unlikely to self-resolve
+            self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
+            self._last_summary_error = "no auxiliary LLM provider configured"
+            logging.warning("Context compression: no provider available for "
+                            "summary. Middle turns will be dropped without summary "
+                            "for %d seconds.",
+                            _SUMMARY_FAILURE_COOLDOWN_SECONDS)
+            return None
+        except Exception as e:
+            # If the summary model is different from the main model and the
+            # error looks permanent (model not found, 503, 404), fall back to
+            # using the main model instead of entering cooldown that leaves
+            # context growing unbounded.  (#8620 sub-issue 4)
+            _status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+            _err_str = str(e).lower()
+            _is_model_not_found = (
+                _status in (404, 503)
+                or "model_not_found" in _err_str
+                or "does not exist" in _err_str
+                or "no available channel" in _err_str
+            )
+            _is_timeout = (
+                _status in (408, 429, 502, 504)
+                or "timeout" in _err_str
+            )
+            if (
+                (_is_model_not_found or _is_timeout)
+                and self.summary_model
+                and self.summary_model != self.model
+                and not getattr(self, "_summary_model_fallen_back", False)
+            ):
+                self._summary_model_fallen_back = True
                 logging.warning(
-                    "Failed to generate context summary: %s. "
-                    "Further summary attempts paused for %d seconds.",
-                    e,
-                    _transient_cooldown,
+                    "Summary model '%s' unavailable (%s). "
+                    "Falling back to main model '%s' for compression.",
+                    self.summary_model, e, self.model,
                 )
-                return None
+                _err_text = str(e).strip() or e.__class__.__name__
+                if len(_err_text) > 220:
+                    _err_text = _err_text[:217].rstrip() + "..."
+                self._last_aux_model_failure_error = _err_text
+                self._last_aux_model_failure_model = self.summary_model
+                self.summary_model = ""  # empty = use main model
+                self._summary_failure_cooldown_until = 0.0  # no cooldown
+                return self._generate_summary(turns_to_summarize, focus_topic=focus_topic)  # retry immediately
 
-        # Retries exhausted (typically repeated context-window overflow)
-        _transient_cooldown = 60
-        self._summary_failure_cooldown_until = time.monotonic() + _transient_cooldown
-        logging.warning(
-            "Failed to generate context summary after %d attempts. "
-            "Further summary attempts paused for %d seconds.",
-            max_attempts,
-            _transient_cooldown,
-        )
-        return None
+            # Unknown-error best-effort retry on main model.
+            if (
+                self.summary_model
+                and self.summary_model != self.model
+                and not getattr(self, "_summary_model_fallen_back", False)
+            ):
+                self._summary_model_fallen_back = True
+                logging.warning(
+                    "Summary model '%s' failed (%s). "
+                    "Retrying on main model '%s' before giving up.",
+                    self.summary_model, e, self.model,
+                )
+                _err_text = str(e).strip() or e.__class__.__name__
+                if len(_err_text) > 220:
+                    _err_text = _err_text[:217].rstrip() + "..."
+                self._last_aux_model_failure_error = _err_text
+                self._last_aux_model_failure_model = self.summary_model
+                self.summary_model = ""  # empty = use main model
+                self._summary_failure_cooldown_until = 0.0
+                return self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+
+            # Transient errors (timeout, rate limit, network) — shorter cooldown
+            _transient_cooldown = 60
+            self._summary_failure_cooldown_until = time.monotonic() + _transient_cooldown
+            err_text = str(e).strip() or e.__class__.__name__
+            if len(err_text) > 220:
+                err_text = err_text[:217].rstrip() + "..."
+            self._last_summary_error = err_text
+            logging.warning(
+                "Failed to generate context summary: %s. "
+                "Further summary attempts paused for %d seconds.",
+                e,
+                _transient_cooldown,
+            )
+            return None
 
     @staticmethod
-    def _with_summary_prefix(summary: str) -> str:
-        """Normalize summary text to the current compaction handoff format."""
+    def _strip_summary_prefix(summary: str) -> str:
+        """Return summary body without the current or legacy handoff prefix."""
         text = (summary or "").strip()
-        for prefix in (LEGACY_SUMMARY_PREFIX, SUMMARY_PREFIX):
+        for prefix in (SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX):
             if text.startswith(prefix):
-                text = text[len(prefix):].lstrip()
-                break
+                return text[len(prefix):].lstrip()
+        return text
+
+    @classmethod
+    def _with_summary_prefix(cls, summary: str) -> str:
+        """Normalize summary text to the current compaction handoff format."""
+        text = cls._strip_summary_prefix(summary)
         return f"{SUMMARY_PREFIX}\n{text}" if text else SUMMARY_PREFIX
+
+    @staticmethod
+    def _is_context_summary_content(content: Any) -> bool:
+        text = _content_text_for_contains(content).lstrip()
+        return text.startswith(SUMMARY_PREFIX) or text.startswith(LEGACY_SUMMARY_PREFIX)
+
+    @classmethod
+    def _find_latest_context_summary(
+        cls,
+        messages: List[Dict[str, Any]],
+        start: int,
+        end: int,
+    ) -> tuple[Optional[int], str]:
+        """Find the newest handoff summary inside a compression window."""
+        for idx in range(end - 1, start - 1, -1):
+            content = messages[idx].get("content")
+            if cls._is_context_summary_content(content):
+                return idx, cls._strip_summary_prefix(_content_text_for_contains(content))
+        return None, ""
 
     # ------------------------------------------------------------------
     # Tool-call / tool-result pair integrity helpers
@@ -996,8 +1094,8 @@ The user has requested that this compaction PRIORITISE preserving all informatio
     def _get_tool_call_id(tc) -> str:
         """Extract the call ID from a tool_call entry (dict or SimpleNamespace)."""
         if isinstance(tc, dict):
-            return tc.get("id", "")
-        return getattr(tc, "id", "") or ""
+            return tc.get("call_id", "") or tc.get("id", "") or ""
+        return getattr(tc, "call_id", "") or getattr(tc, "id", "") or ""
 
     def _sanitize_tool_pairs(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Fix orphaned tool_call / tool_result pairs after compression.
@@ -1184,8 +1282,9 @@ The user has requested that this compaction PRIORITISE preserving all informatio
 
         for i in range(n - 1, head_end - 1, -1):
             msg = messages[i]
-            content = msg.get("content") or ""
-            msg_tokens = len(content) // _CHARS_PER_TOKEN + 10  # +10 for role/metadata
+            raw_content = msg.get("content") or ""
+            content_len = _content_length_for_budget(raw_content)
+            msg_tokens = content_len // _CHARS_PER_TOKEN + 10  # +10 for role/metadata
             # Include tool call arguments in estimate
             for tc in msg.get("tool_calls") or []:
                 if isinstance(tc, dict):
@@ -1254,6 +1353,13 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 related to this topic and be more aggressive about compressing
                 everything else.  Inspired by Claude Code's ``/compact``.
         """
+        # Reset per-call summary failure state — callers inspect these fields
+        # after compress() returns to decide whether to surface a warning.
+        self._last_summary_dropped_count = 0
+        self._last_summary_fallback_used = False
+        self._last_summary_error = None
+        self._last_aux_model_failure_error = None
+        self._last_aux_model_failure_model = None
         n_messages = len(messages)
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)
         _min_for_compress = self.protect_first_n + 3 + 1
@@ -1286,6 +1392,15 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             return messages
 
         turns_to_summarize = messages[compress_start:compress_end]
+        summary_idx, summary_body = self._find_latest_context_summary(
+            messages,
+            compress_start,
+            compress_end,
+        )
+        if summary_idx is not None:
+            if summary_body and not self._previous_summary:
+                self._previous_summary = summary_body
+            turns_to_summarize = messages[summary_idx + 1:compress_end]
 
         if not self.quiet_mode:
             logger.info(
@@ -1332,11 +1447,13 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             if not self.quiet_mode:
                 logger.warning("Summary generation failed — inserting static fallback context marker")
             n_dropped = compress_end - compress_start
+            self._last_summary_dropped_count = n_dropped
+            self._last_summary_fallback_used = True
             summary = (
                 f"{SUMMARY_PREFIX}\n"
-                f"Summary generation was unavailable. {n_dropped} conversation turns were "
+                f"Summary generation was unavailable. {n_dropped} message(s) were "
                 f"removed to free context space but could not be summarized. The removed "
-                f"turns contained earlier work in this session. Continue based on the "
+                f"messages contained earlier work in this session. Continue based on the "
                 f"recent messages below and the current state of any files or resources."
             )
 
@@ -1361,6 +1478,19 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 # Merge the summary into the first tail message instead
                 # of inserting a standalone message that breaks alternation.
                 _merge_summary_into_tail = True
+
+        # When the summary lands as a standalone role="user" message,
+        # weak models read the verbatim "## Active Task" quote of a past
+        # user request as fresh input (#11475, #14521). Append the explicit
+        # end marker — the same one used in the merge-into-tail path — so
+        # the model has a clear "summary above, not new input" signal.
+        if not _merge_summary_into_tail and summary_role == "user":
+            summary = (
+                summary
+                + "\n\n--- END OF CONTEXT SUMMARY — "
+                "respond to the message below, not the summary above ---"
+            )
+
         if not _merge_summary_into_tail:
             compressed.append({"role": summary_role, "content": summary})
 

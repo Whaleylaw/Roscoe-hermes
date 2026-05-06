@@ -1,9 +1,14 @@
 ---
 name: google-workspace
 description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs integration for Hermes. For Aaron/Lawyer Incorporated, use the Domain-Wide Delegation service-account helper (`scripts/google_api.py`) at `~/.hermes/auth/gws-sa.json`; do not use OAuth or `gws auth login` for Gmail unless explicitly requested.
-version: 1.0.0
+version: 1.0.1
 author: Nous Research
 license: MIT
+required_credential_files:
+  - path: google_token.json
+    description: Google OAuth2 token (created by setup script)
+  - path: google_client_secret.json
+    description: Google OAuth2 client credentials (downloaded from Google Cloud Console)
 metadata:
   hermes:
     tags: [Google, Gmail, Calendar, Drive, Sheets, Docs, Contacts, Email, OAuth]
