@@ -119,6 +119,51 @@ from agent.trajectory import (
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
 
 
+def normalize_legacy_compression_config(config: dict) -> list[str]:
+    """Map legacy ``compression.summary_*`` keys into ``auxiliary.compression``.
+
+    Config migrations remove these keys for normal installs, but hand-edited
+    configs can reintroduce them. Returning the mapped field names makes this
+    helper easy to log and unit-test.
+    """
+    if not isinstance(config, dict):
+        return []
+    legacy_comp = config.get("compression", {})
+    if not isinstance(legacy_comp, dict):
+        return []
+
+    aux_root = config.setdefault("auxiliary", {})
+    if not isinstance(aux_root, dict):
+        aux_root = {}
+        config["auxiliary"] = aux_root
+    aux_comp = aux_root.setdefault("compression", {})
+    if not isinstance(aux_comp, dict):
+        aux_comp = {}
+        aux_root["compression"] = aux_comp
+
+    mapped: list[str] = []
+    legacy_model = str(legacy_comp.get("summary_model") or "").strip()
+    if legacy_model and not str(aux_comp.get("model") or "").strip():
+        aux_comp["model"] = legacy_model
+        mapped.append("model")
+
+    legacy_provider = str(legacy_comp.get("summary_provider") or "").strip()
+    if (
+        legacy_provider
+        and legacy_provider != "auto"
+        and str(aux_comp.get("provider") or "auto").strip() in ("", "auto")
+    ):
+        aux_comp["provider"] = legacy_provider
+        mapped.append("provider")
+
+    legacy_base_url = str(legacy_comp.get("summary_base_url") or "").strip()
+    if legacy_base_url and not str(aux_comp.get("base_url") or "").strip():
+        aux_comp["base_url"] = legacy_base_url
+        mapped.append("base_url")
+
+    return mapped
+
+
 
 class _SafeWriter:
     """Transparent stdio wrapper that catches OSError/ValueError from broken pipes.
@@ -802,6 +847,7 @@ class AIAgent:
         chat_type: str = None,
         thread_id: str = None,
         gateway_session_key: str = None,
+        context_cwd: str = None,
         skip_context_files: bool = False,
         skip_memory: bool = False,
         session_db=None,
@@ -876,6 +922,7 @@ class AIAgent:
         self._chat_type = chat_type
         self._thread_id = thread_id
         self._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+        self._context_cwd = context_cwd
         # Pluggable print function — CLI replaces this with _cprint so that
         # raw ANSI status lines are routed through prompt_toolkit's renderer
         # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -1487,6 +1534,37 @@ class AIAgent:
             _agent_cfg = _load_agent_config()
         except Exception:
             _agent_cfg = {}
+
+        # Back-compat: compression.summary_* was migrated to
+        # auxiliary.compression.* in config v17, but real user configs can
+        # still carry the old keys if they were hand-edited or skipped a
+        # migration. Normalize in memory so compression uses the requested
+        # summary model instead of silently falling back to auto/main routing.
+        try:
+            _raw_cfg = _agent_cfg if isinstance(_agent_cfg, dict) else {}
+            _legacy_comp = _raw_cfg.get("compression", {})
+            if isinstance(_legacy_comp, dict):
+                _legacy_mapped = normalize_legacy_compression_config(_raw_cfg)
+
+                if _legacy_mapped:
+                    logger.info(
+                        "Mapped legacy compression.summary_* config to "
+                        "auxiliary.compression for this session: %s",
+                        ", ".join(_legacy_mapped),
+                    )
+                elif any(key in _legacy_comp for key in ("summary_model", "summary_provider", "summary_base_url")):
+                    logger.warning(
+                        "Deprecated config keys detected under compression: %s. "
+                        "Equivalent auxiliary.compression values are already set; use "
+                        "auxiliary.compression.{model,provider,base_url} instead.",
+                        ", ".join(
+                            key for key in ("summary_model", "summary_provider", "summary_base_url")
+                            if key in _legacy_comp
+                        ),
+                    )
+        except Exception:
+            pass
+
         # Cache only the derived auxiliary compression context override that is
         # needed later by the startup feasibility check.  Avoid exposing a
         # broad pseudo-public config object on the agent instance.
@@ -1547,6 +1625,22 @@ class AIAgent:
                                 _st = self._session_db.get_session_title(self.session_id)
                                 if _st:
                                     _init_kwargs["session_title"] = _st
+                            except Exception:
+                                pass
+                        # Thread per-turn cwd for passive case-scoped memory/workspace resolution.
+                        _context_cwd = None
+                        try:
+                            from agent.turn_context import get_turn_cwd as _get_turn_cwd
+                            _context_cwd = self._context_cwd or _get_turn_cwd()
+                        except Exception:
+                            _context_cwd = self._context_cwd
+                        if _context_cwd:
+                            _init_kwargs["cwd"] = _context_cwd
+                            try:
+                                from plugins.memory.honcho.client import resolve_case_workspace_from_cwd
+                                _case_ws = resolve_case_workspace_from_cwd(_context_cwd)
+                                if _case_ws:
+                                    _init_kwargs["honcho_workspace"] = _case_ws
                             except Exception:
                                 pass
                         # Thread gateway user identity for per-user memory scoping
@@ -4951,11 +5045,49 @@ class AIAgent:
     def _close_request_openai_client(self, client: Any, *, reason: str) -> None:
         self._close_openai_client(client, reason=reason, shared=False)
 
+    def _inject_langfuse_request_metadata(self, api_kwargs: dict) -> dict:
+        """Best-effort attach session metadata at request creation time.
+
+        This avoids relying on "active span" timing by embedding case/session
+        identifiers directly into model request metadata, which Langfuse
+        instrumentation can persist on traced generations.
+        """
+        try:
+            from gateway.session_context import get_session_env as _get_session_env
+            session_key = (_get_session_env("HERMES_SESSION_KEY", "") or "").strip()
+            if not session_key:
+                return api_kwargs
+
+            platform = (_get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip()
+            chat_id = (_get_session_env("HERMES_SESSION_CHAT_ID", "") or "").strip()
+            thread_id = (_get_session_env("HERMES_SESSION_THREAD_ID", "") or "").strip()
+            user_id = (_get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
+            channel_cwd = (os.getenv("HERMES_CHANNEL_CWD", "") or "").strip()
+            session_isolated = (os.getenv("HERMES_SESSION_ISOLATED", "") or "").strip().lower() in ("1", "true", "yes")
+
+            req = dict(api_kwargs)
+            metadata = dict(req.get("metadata") or {})
+            metadata.update({
+                "hermes_session_key": session_key,
+                "hermes_platform": platform,
+                "hermes_chat_id": chat_id,
+                "hermes_thread_id": thread_id,
+                "hermes_channel_cwd": channel_cwd,
+                "hermes_session_isolated": session_isolated,
+            })
+            if user_id:
+                metadata["hermes_user_id"] = user_id
+            req["metadata"] = metadata
+            return req
+        except Exception:
+            return api_kwargs
+
     def _run_codex_stream(self, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
         """Execute one streaming Responses API request and return the final response."""
         import httpx as _httpx
 
         active_client = client or self._ensure_primary_openai_client(reason="codex_stream_direct")
+        api_kwargs = self._inject_langfuse_request_metadata(api_kwargs)
         max_stream_retries = 1
         has_tool_calls = False
         first_delta_fired = False
@@ -5083,6 +5215,7 @@ class AIAgent:
         """Fallback path for stream completion edge cases on Codex-style Responses backends."""
         active_client = client or self._ensure_primary_openai_client(reason="codex_create_stream_fallback")
         fallback_kwargs = dict(api_kwargs)
+        fallback_kwargs = self._inject_langfuse_request_metadata(fallback_kwargs)
         fallback_kwargs["stream"] = True
         fallback_kwargs = self._get_transport().preflight_kwargs(fallback_kwargs, allow_stream=True)
         stream_or_response = active_client.responses.create(**fallback_kwargs)
@@ -5490,7 +5623,8 @@ class AIAgent:
                     result["response"] = normalize_converse_response(raw_response)
                 else:
                     request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
-                    result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
+                    _req_kwargs = self._inject_langfuse_request_metadata(api_kwargs)
+                    result["response"] = request_client_holder["client"].chat.completions.create(**_req_kwargs)
             except Exception as e:
                 result["error"] = e
             finally:
@@ -5834,6 +5968,7 @@ class AIAgent:
                     pool=30.0,
                 ),
             }
+            stream_kwargs = self._inject_langfuse_request_metadata(stream_kwargs)
             request_client_holder["client"] = self._create_request_openai_client(
                 reason="chat_completion_stream_request"
             )
@@ -7777,6 +7912,14 @@ class AIAgent:
             focus_topic,
         )
         # Pre-compression memory flush: let the model save memories before they're lost
+        if self.tool_progress_callback:
+            try:
+                self.tool_progress_callback(
+                    "status.update", "flush_memories",
+                    "Saving memories before compaction…", None,
+                )
+            except Exception:
+                pass
         self.flush_memories(messages, min_turns=0)
 
         # Notify external memory provider before compression discards context
@@ -7786,6 +7929,14 @@ class AIAgent:
             except Exception:
                 pass
 
+        if self.tool_progress_callback:
+            try:
+                self.tool_progress_callback(
+                    "status.update", "compress",
+                    f"Compressing {_pre_msg_count} messages…", None,
+                )
+            except Exception:
+                pass
         try:
             compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
         except TypeError:
@@ -7863,6 +8014,72 @@ class AIAgent:
             self.session_id or "none", _pre_msg_count, len(compressed),
             f"{_compressed_est:,}",
         )
+
+        if self.tool_progress_callback:
+            try:
+                self.tool_progress_callback(
+                    "status.update", "compress_done",
+                    f"Compaction done: {_pre_msg_count}→{len(compressed)} msgs, ~{_compressed_est:,} tokens",
+                    None,
+                )
+            except Exception:
+                pass
+
+        # Persist anti-thrash state to the (post-rotation) session row so
+        # the next AIAgent for this session restores it. Without this the
+        # back-off counter resets every request.
+        if self._session_db and self.session_id:
+            try:
+                self._session_db.set_compressor_state(self.session_id, {
+                    "ineffective_count": int(
+                        getattr(self.context_compressor, "_ineffective_compression_count", 0)
+                    ),
+                    "last_savings_pct": float(
+                        getattr(self.context_compressor, "_last_compression_savings_pct", 100.0)
+                    ),
+                })
+            except Exception as _e:
+                logger.debug("Could not persist compressor state: %s", _e)
+
+        # Compress the unified timeline alongside the agent's session.
+        # Without this, every next request reloads the full pre-compression
+        # timeline (144MB+ for unified-shared sessions) and preflight fires
+        # forever.  Mirrors the session-rotation pattern: archive old primary
+        # rows (still searchable, just not loaded), then write the compressed
+        # message list back as new primary rows so continuity is preserved.
+        if self._session_db and compressed:
+            try:
+                from hermes_cli.profiles import get_active_profile_name
+                _profile_id = get_active_profile_name()
+                _archived = self._session_db.archive_timeline_primary(_profile_id)
+                if _archived > 0:
+                    import time as _time
+                    _now_ts = _time.time()
+                    for _msg in compressed:
+                        _role = _msg.get("role") if isinstance(_msg, dict) else None
+                        _content = _msg.get("content") if isinstance(_msg, dict) else None
+                        if not _content or not isinstance(_content, str):
+                            continue
+                        _direction = "outbound" if _role == "assistant" else "inbound"
+                        self._session_db.append_timeline_message(
+                            profile_id=_profile_id,
+                            direction=_direction,
+                            platform="_compaction",
+                            source_chat_id="_summary",
+                            source_thread_id=None,
+                            author="agent" if _direction == "outbound" else (_role or "system"),
+                            content=_content,
+                            message_id=None,
+                            ts=_now_ts,
+                            salience="primary",
+                        )
+                    logger.info(
+                        "Unified timeline compaction: archived %d row(s), wrote %d compressed row(s) for profile=%s",
+                        _archived, len(compressed), _profile_id,
+                    )
+            except Exception as _e:
+                logger.warning("Unified timeline compaction failed: %s", _e)
+
         return compressed, new_system_prompt
 
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
@@ -9003,6 +9220,10 @@ class AIAgent:
         # Preserve the original user message (no nudge injection).
         original_user_message = persist_user_message if persist_user_message is not None else user_message
 
+        # Langfuse session metadata is injected at model request creation time
+        # (see _inject_langfuse_request_metadata), which is more reliable than
+        # turn-start context mutators in async gateway flows.
+
         # Track memory nudge trigger (turn-based, checked here).
         # Skill trigger is checked AFTER the agent loop completes, based on
         # how many tool iterations THIS turn used.
@@ -9077,6 +9298,24 @@ class AIAgent:
 
         active_system_prompt = self._cached_system_prompt
 
+        # Restore compressor anti-thrash state from the session row.
+        # The gateway constructs a fresh AIAgent per request, so without
+        # this restore the in-memory _ineffective_compression_count would
+        # always start at 0 and the back-off in should_compress() would
+        # never fire across requests on the unified shared session.
+        if self._session_db and self.session_id and self.compression_enabled:
+            try:
+                _persisted = self._session_db.get_compressor_state(self.session_id)
+                if _persisted:
+                    self.context_compressor._ineffective_compression_count = int(
+                        _persisted.get("ineffective_count", 0)
+                    )
+                    _last_pct = _persisted.get("last_savings_pct")
+                    if isinstance(_last_pct, (int, float)):
+                        self.context_compressor._last_compression_savings_pct = float(_last_pct)
+            except Exception as _e:
+                logger.debug("Could not restore compressor state: %s", _e)
+
         # ── Preflight context compression ──
         # Before entering the main loop, check if the loaded conversation
         # history already exceeds the model's context threshold.  This handles
@@ -9110,6 +9349,15 @@ class AIAgent:
                         f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
                         f">= {self.context_compressor.threshold_tokens:,} threshold"
                     )
+                if self.tool_progress_callback:
+                    try:
+                        self.tool_progress_callback(
+                            "status.update", "preflight_compression",
+                            f"Compacting context (~{_preflight_tokens:,} tokens)…",
+                            None,
+                        )
+                    except Exception:
+                        pass
                 # May need multiple passes for very large sessions with small
                 # context windows (each pass summarises the middle N turns).
                 for _pass in range(3):
@@ -12169,6 +12417,9 @@ class AIAgent:
                 )
             except Exception as exc:
                 logger.warning("post_llm_call hook failed: %s", exc)
+
+            # Langfuse output/session metadata is attached at provider request
+            # instrumentation boundaries for reliability in gateway async flows.
 
         # Extract reasoning from the last assistant message (if any)
         last_reasoning = None

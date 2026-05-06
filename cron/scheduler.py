@@ -675,14 +675,19 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
     # delivery works and can suppress delivery when appropriate.
     cron_hint = (
         "[SYSTEM: You are running as a scheduled cron job. "
-        "DELIVERY: Your final response will be automatically delivered "
-        "to the user — do NOT use send_message or try to deliver "
-        "the output yourself. Just produce your report/output as your "
-        "final response and the system handles the rest. "
-        "SILENT: If there is genuinely nothing new to report, respond "
-        "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
-        "Never combine [SILENT] with content — either report your "
-        "findings normally, or say [SILENT] and nothing more.]\n\n"
+        "DELIVERY: Your final response is the cron run report/output — "
+        "do NOT use send_message to deliver that final report yourself. "
+        "Just produce the report as your final response and the scheduler "
+        "handles report delivery/storage. SEPARATE EXTERNAL ACTIONS: If "
+        "the job prompt explicitly requires a separate external action "
+        "(for example, sending a case alert to a specific Slack case "
+        "channel), then use the appropriate tool for that action; this "
+        "does not count as delivering the cron report yourself. "
+        "SILENT: If there is genuinely nothing new to report and no "
+        "external action was required, respond with exactly \"[SILENT]\" "
+        "(nothing else) to suppress delivery. Never combine [SILENT] "
+        "with content — either report your findings normally, or say "
+        "[SILENT] and nothing more.]\n\n"
     )
     prompt = cron_hint + prompt
     if skills is None:

@@ -1255,11 +1255,12 @@ class TestBuildJobPromptSilentHint:
         assert "[SILENT]" in result
 
     def test_delivery_guidance_present(self):
-        """Cron hint tells agents their final response is auto-delivered."""
+        """Cron hint tells agents the final response is scheduler-managed."""
         job = {"prompt": "Generate a report"}
         result = _build_job_prompt(job)
         assert "do NOT use send_message" in result
-        assert "automatically delivered" in result
+        assert "final report" in result
+        assert "SEPARATE EXTERNAL ACTIONS" in result
 
     def test_delivery_guidance_precedes_user_prompt(self):
         """System guidance appears before the user's prompt text."""

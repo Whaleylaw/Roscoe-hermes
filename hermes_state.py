@@ -31,7 +31,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     pricing_version TEXT,
     title TEXT,
     api_call_count INTEGER DEFAULT 0,
+    compressor_state TEXT,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -401,6 +402,20 @@ class SessionDB:
                 cursor.executescript(SCHEMA_SQL)
                 cursor.executescript(FTS_SQL)
                 cursor.execute("UPDATE schema_version SET version = 9")
+            if current_version < 10:
+                # v10: persist context-compressor anti-thrash state across
+                # AIAgent instances. The gateway constructs a fresh AIAgent
+                # per request, so the in-memory _ineffective_compression_count
+                # never accumulated, defeating the back-off. Storing it on
+                # the session row keeps state durable across requests for
+                # the unified shared session.
+                try:
+                    cursor.execute(
+                        'ALTER TABLE sessions ADD COLUMN "compressor_state" TEXT'
+                    )
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+                cursor.execute("UPDATE schema_version SET version = 10")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -725,6 +740,40 @@ class SessionDB:
             )
             row = cursor.fetchone()
         return row["title"] if row else None
+
+    def get_compressor_state(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return the persisted compressor anti-thrash state for a session.
+
+        Returns a dict (e.g. ``{"ineffective_count": 2, "last_savings_pct": 5.3}``)
+        or None if the session has no stored state. Callers should treat None
+        and empty-dict identically (fresh state).
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT compressor_state FROM sessions WHERE id = ?", (session_id,)
+            )
+            row = cursor.fetchone()
+        if not row or not row["compressor_state"]:
+            return None
+        try:
+            return json.loads(row["compressor_state"])
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    def set_compressor_state(self, session_id: str, state: Dict[str, Any]) -> bool:
+        """Persist compressor anti-thrash state on the session row.
+
+        Returns True if the session row was found and updated.
+        """
+        payload = json.dumps(state) if state else None
+        def _do(conn):
+            cursor = conn.execute(
+                "UPDATE sessions SET compressor_state = ? WHERE id = ?",
+                (payload, session_id),
+            )
+            return cursor.rowcount
+        rowcount = self._execute_write(_do)
+        return rowcount > 0
 
     def get_session_by_title(self, title: str) -> Optional[Dict[str, Any]]:
         """Look up a session by exact title. Returns session dict or None."""
@@ -1107,6 +1156,34 @@ class SessionDB:
                  source_thread_id, author, content, message_id, salience),
             )
             return seq
+        return self._execute_write(_do)
+
+    def archive_timeline_primary(
+        self, profile_id: str, *, before_seq: Optional[int] = None,
+    ) -> int:
+        """Mark primary timeline rows as archived for a profile.
+
+        When ``before_seq`` is None, archives every primary row.  When given,
+        archives only rows with ``seq < before_seq`` so callers can keep a
+        recent tail intact.  Returns the number of rows updated.
+        Archived rows stay in the table (searchable) but are skipped by
+        ``get_timeline_messages`` (which defaults to salience='primary').
+        """
+        def _do(conn):
+            if before_seq is None:
+                cursor = conn.execute(
+                    "UPDATE unified_timeline SET salience = 'archived' "
+                    "WHERE profile_id = ? AND salience = 'primary'",
+                    (profile_id,),
+                )
+            else:
+                cursor = conn.execute(
+                    "UPDATE unified_timeline SET salience = 'archived' "
+                    "WHERE profile_id = ? AND salience = 'primary' "
+                    "AND seq < ?",
+                    (profile_id, int(before_seq)),
+                )
+            return cursor.rowcount
         return self._execute_write(_do)
 
     def get_last_inbound_seq(self, profile_id: str) -> Optional[int]:

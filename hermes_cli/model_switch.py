@@ -170,7 +170,17 @@ class DirectAlias(NamedTuple):
 
 
 # Built-in direct aliases (can be extended via config.yaml model_aliases:)
-_BUILTIN_DIRECT_ALIASES: dict[str, DirectAlias] = {}
+_BUILTIN_DIRECT_ALIASES: dict[str, DirectAlias] = {
+    # OpenRouter releases that may lag models.dev alias-family resolution.
+    # Keep explicit so `/model deepseek-v4` and `/model kimi-k2.6` switch to
+    # the requested generation instead of an older family match.
+    "deepseek-v4": DirectAlias("deepseek/deepseek-v4-pro", "openrouter", ""),
+    "deepseek-v4-pro": DirectAlias("deepseek/deepseek-v4-pro", "openrouter", ""),
+    "deepseekv4": DirectAlias("deepseek/deepseek-v4-pro", "openrouter", ""),
+    "kimi-k2.6": DirectAlias("moonshotai/kimi-k2.6", "openrouter", ""),
+    "kimi-k26": DirectAlias("moonshotai/kimi-k2.6", "openrouter", ""),
+    "k2.6": DirectAlias("moonshotai/kimi-k2.6", "openrouter", ""),
+}
 
 # Merged dict (builtins + user config); populated by _load_direct_aliases()
 DIRECT_ALIASES: dict[str, DirectAlias] = {}
