@@ -1037,6 +1037,33 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 self._summary_failure_cooldown_until = 0.0
                 return self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
 
+            # Context-window / oversize-input errors are recoverable by
+            # retrying with fewer (newer) turns. Keep retrying with smaller
+            # slices before giving up — losing turns is worse than one extra
+            # round-trip.
+            _is_context_window_error = (
+                "context window" in _err_str
+                or "maximum context length" in _err_str
+                or "prompt is too long" in _err_str
+                or "input exceeds" in _err_str
+                or "too many tokens" in _err_str
+                or "context_length_exceeded" in _err_str
+                or "string_above_max_length" in _err_str
+                or "maximum length" in _err_str
+                or "request too large" in _err_str
+                or "payload too large" in _err_str
+            )
+            if _is_context_window_error and len(turns_for_attempt) > min_turns_to_keep:
+                new_len = max(min_turns_to_keep, int(len(turns_for_attempt) * 0.6))
+                if new_len < len(turns_for_attempt):
+                    smaller = list(turns_for_attempt)[-new_len:]
+                    logging.warning(
+                        "Context summary input exceeded model window (%s). "
+                        "Retrying with newest %d/%d turns.",
+                        e, new_len, len(turns_for_attempt),
+                    )
+                    return self._generate_summary(smaller, focus_topic=focus_topic)
+
             # Transient errors (timeout, rate limit, network) — shorter cooldown
             _transient_cooldown = 60
             self._summary_failure_cooldown_until = time.monotonic() + _transient_cooldown
