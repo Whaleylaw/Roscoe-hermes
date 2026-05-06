@@ -12,6 +12,7 @@ from plugins.memory.honcho.client import (
     HonchoClientConfig,
     get_honcho_client,
     reset_honcho_client,
+    resolve_case_workspace_from_cwd,
     resolve_active_host,
     resolve_config_path,
     GLOBAL_CONFIG_PATH,
@@ -82,6 +83,21 @@ class TestFromEnv:
         with patch.dict(os.environ, {"HONCHO_TIMEOUT": "90"}, clear=True):
             config = HonchoClientConfig.from_env()
         assert config.timeout == 90.0
+
+
+class TestCaseWorkspaceResolution:
+    def test_resolves_firmvault_case_cwd_to_case_workspace(self):
+        cwd = "/Users/aaronwhaley/.hermes/agents/paralegal/workspace/FirmVault/cases/michael-crader"
+
+        assert resolve_case_workspace_from_cwd(cwd) == "case-michael-crader"
+
+    def test_resolves_nested_path_inside_case_folder(self):
+        cwd = "/Users/aaronwhaley/.hermes/agents/paralegal/workspace/FirmVault/cases/michael-crader/Activity Log"
+
+        assert resolve_case_workspace_from_cwd(cwd) == "case-michael-crader"
+
+    def test_non_case_cwd_returns_none(self):
+        assert resolve_case_workspace_from_cwd("/Users/aaronwhaley/Github/Roscoe-hermes") is None
 
 
 class TestFromGlobalConfig:
@@ -608,6 +624,36 @@ class TestGetHonchoClient:
         assert client is fake_honcho
         mock_honcho.assert_called_once()
         assert mock_honcho.call_args.kwargs["timeout"] == 77.5
+
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("honcho"),
+        reason="honcho SDK not installed"
+    )
+    def test_client_cache_is_keyed_by_workspace(self):
+        fake_case = MagicMock(name="case-client")
+        fake_default = MagicMock(name="default-client")
+        case_cfg = HonchoClientConfig(
+            api_key="test-key",
+            workspace_id="case-michael-crader",
+            environment="production",
+        )
+        default_cfg = HonchoClientConfig(
+            api_key="test-key",
+            workspace_id="lawyer-incorporated",
+            environment="production",
+        )
+
+        with patch("honcho.Honcho", side_effect=[fake_case, fake_default]) as mock_honcho:
+            case_client = get_honcho_client(case_cfg)
+            default_client = get_honcho_client(default_cfg)
+            case_client_again = get_honcho_client(case_cfg)
+
+        assert case_client is fake_case
+        assert default_client is fake_default
+        assert case_client_again is fake_case
+        assert mock_honcho.call_count == 2
+        assert mock_honcho.call_args_list[0].kwargs["workspace_id"] == "case-michael-crader"
+        assert mock_honcho.call_args_list[1].kwargs["workspace_id"] == "lawyer-incorporated"
 
 
 class TestResolveSessionNameGatewayKey:

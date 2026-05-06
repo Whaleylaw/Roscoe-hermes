@@ -52,11 +52,21 @@ _INTERNAL_NOTE_RE = re.compile(
     r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as informational background data\.\]\s*',
     re.IGNORECASE,
 )
+# Defensive: if a memory-context fence leaks without a closing tag (e.g.,
+# truncation during copy/paste), strip from opening tag to end.
+_DANGLING_CONTEXT_RE = re.compile(
+    # Only treat as dangling when the opening fence starts a logical block
+    # (start of text or a new line). This avoids stripping benign inline
+    # strings like "...INJECTED<memory-context>fact two" in tests.
+    r'(?:^|\n)\s*<\s*memory-context\s*>[\s\S]*$',
+    re.IGNORECASE,
+)
 
 
 def sanitize_context(text: str) -> str:
     """Strip fence tags, injected context blocks, and system notes from provider output."""
     text = _INTERNAL_CONTEXT_RE.sub('', text)
+    text = _DANGLING_CONTEXT_RE.sub('', text)
     text = _INTERNAL_NOTE_RE.sub('', text)
     text = _FENCE_TAG_RE.sub('', text)
     return text

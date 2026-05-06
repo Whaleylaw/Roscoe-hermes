@@ -20,6 +20,7 @@ import logging
 import re
 import threading
 import time
+from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
@@ -285,13 +286,24 @@ class HonchoMemoryProvider(MemoryProvider):
                 self._cron_skipped = True
                 return
 
-            from plugins.memory.honcho.client import HonchoClientConfig, get_honcho_client
+            from plugins.memory.honcho.client import (
+                HonchoClientConfig,
+                get_honcho_client,
+                resolve_case_workspace_from_cwd,
+            )
             from plugins.memory.honcho.session import HonchoSessionManager
 
             cfg = HonchoClientConfig.from_global_config()
             if not cfg.enabled or not (cfg.api_key or cfg.base_url):
                 logger.debug("Honcho not configured — plugin inactive")
                 return
+
+            workspace_override = (kwargs.get("honcho_workspace") or "").strip()
+            if not workspace_override:
+                workspace_override = resolve_case_workspace_from_cwd(kwargs.get("cwd")) or ""
+            if workspace_override and workspace_override != cfg.workspace_id:
+                cfg = replace(cfg, workspace_id=workspace_override)
+                logger.debug("Honcho workspace overridden for turn: %s", workspace_override)
 
             self._config = cfg
 
@@ -361,8 +373,10 @@ class HonchoMemoryProvider(MemoryProvider):
         # ----- B3: resolve_session_name -----
         session_title = kwargs.get("session_title")
         gateway_session_key = kwargs.get("gateway_session_key")
+        cwd = kwargs.get("cwd")
         self._session_key = (
             cfg.resolve_session_name(
+                cwd=cwd,
                 session_title=session_title,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
@@ -382,11 +396,14 @@ class HonchoMemoryProvider(MemoryProvider):
         # each one would flood the backend with short-lived duplicates instead
         # of performing a one-time migration.
         try:
-            if not session.messages and cfg.session_strategy != "per-session":
+            _case_workspace = str(getattr(cfg, "workspace_id", "")).startswith("case-")
+            if not session.messages and cfg.session_strategy != "per-session" and not _case_workspace:
                 from hermes_constants import get_hermes_home
                 mem_dir = str(get_hermes_home() / "memories")
                 self._manager.migrate_memory_files(self._session_key, mem_dir)
                 logger.debug("Honcho memory file migration attempted for new session: %s", self._session_key)
+            elif _case_workspace:
+                logger.debug("Skipping global memory-file migration for case workspace: %s", cfg.workspace_id)
             elif cfg.session_strategy == "per-session":
                 logger.debug(
                     "Honcho memory file migration skipped: per-session strategy creates a fresh session per run (%s)",

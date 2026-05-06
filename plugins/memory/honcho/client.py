@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,6 +30,42 @@ logger = logging.getLogger(__name__)
 
 GLOBAL_CONFIG_PATH = Path.home() / ".honcho" / "config.json"
 HOST = "hermes"
+
+
+def _sanitize_workspace_component(value: str) -> str:
+    """Sanitize a case slug/workspace component for Honcho identifiers."""
+    return re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip()).strip("-").lower()
+
+
+def case_workspace_id(case_slug: str) -> str | None:
+    """Return the conventional Honcho workspace for a FirmVault case slug."""
+    slug = _sanitize_workspace_component(case_slug)
+    return f"case-{slug}" if slug else None
+
+
+def resolve_case_workspace_from_cwd(cwd: str | None) -> str | None:
+    """Derive a case-scoped Honcho workspace from a FirmVault case cwd.
+
+    FirmVault case paths follow ``.../FirmVault/cases/<case-slug>/...``.
+    Slack ``channel_cwds`` already pins turns to that folder; this helper lets
+    Honcho passively follow the same case boundary without duplicating a
+    workspace map for every case.
+    """
+    if not cwd:
+        return None
+    try:
+        parts = Path(os.path.expanduser(str(cwd))).parts
+    except (TypeError, ValueError, OSError):
+        return None
+
+    for idx, part in enumerate(parts[:-1]):
+        if part != "cases":
+            continue
+        if idx > 0 and parts[idx - 1] != "FirmVault":
+            continue
+        if idx + 1 < len(parts):
+            return case_workspace_id(parts[idx + 1])
+    return None
 
 
 def resolve_active_host() -> str:
@@ -593,6 +630,7 @@ class HonchoClientConfig:
 
 
 _honcho_client: Honcho | None = None
+_honcho_clients: dict[tuple[Any, ...], Honcho] = {}
 
 
 def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
@@ -601,10 +639,7 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
     When no config is provided, attempts to load ~/.honcho/config.json
     first, falling back to environment variables.
     """
-    global _honcho_client
-
-    if _honcho_client is not None:
-        return _honcho_client
+    global _honcho_client, _honcho_clients
 
     if config is None:
         config = HonchoClientConfig.from_global_config()
@@ -670,6 +705,19 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
     else:
         effective_api_key = config.api_key
 
+    cache_key = (
+        resolved_base_url or "",
+        config.environment,
+        config.workspace_id,
+        config.host,
+        bool(effective_api_key),
+        resolved_timeout,
+    )
+    cached = _honcho_clients.get(cache_key)
+    if cached is not None:
+        _honcho_client = cached
+        return cached
+
     kwargs: dict = {
         "workspace_id": config.workspace_id,
         "api_key": effective_api_key,
@@ -681,11 +729,13 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
         kwargs["timeout"] = resolved_timeout
 
     _honcho_client = Honcho(**kwargs)
+    _honcho_clients[cache_key] = _honcho_client
 
     return _honcho_client
 
 
 def reset_honcho_client() -> None:
     """Reset the Honcho client singleton (useful for testing)."""
-    global _honcho_client
+    global _honcho_client, _honcho_clients
     _honcho_client = None
+    _honcho_clients = {}
