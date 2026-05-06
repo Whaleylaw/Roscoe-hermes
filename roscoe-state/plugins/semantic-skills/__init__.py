@@ -17,9 +17,15 @@ Dependencies:
 
 Config (env vars):
   SEMANTIC_SKILLS_ENABLED=true       — master toggle (default: true)
-  SEMANTIC_SKILLS_THRESHOLD=0.45     — minimum cosine similarity (default: 0.45)
-  SEMANTIC_SKILLS_MAX_RESULTS=10     — max skills to surface (default: 10)
+  SEMANTIC_SKILLS_THRESHOLD=0.60     — minimum cosine similarity (default: 0.60)
+  SEMANTIC_SKILLS_MAX_RESULTS=4      — max skills to surface (default: 4)
   SEMANTIC_SKILLS_MODEL=BAAI/bge-small-en-v1.5  — embedding model
+
+Relevance tuning:
+  - low-signal acknowledgements/status nudges return no matches;
+  - explicit skill/plugin/hook/filter queries only surface skill-system skills;
+  - normal task queries need lexical support or a very strong vector score;
+  - weak tail matches are trimmed so only tight result clusters are injected.
 """
 
 import logging
@@ -35,15 +41,29 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 ENABLED = os.environ.get("SEMANTIC_SKILLS_ENABLED", "true").lower() in ("true", "1", "yes")
-THRESHOLD = float(os.environ.get("SEMANTIC_SKILLS_THRESHOLD", "0.55"))
-MAX_RESULTS = int(os.environ.get("SEMANTIC_SKILLS_MAX_RESULTS", "8"))
+THRESHOLD = float(os.environ.get("SEMANTIC_SKILLS_THRESHOLD", "0.60"))
+MAX_RESULTS = int(os.environ.get("SEMANTIC_SKILLS_MAX_RESULTS", "4"))
 MODEL_NAME = os.environ.get("SEMANTIC_SKILLS_MODEL", "BAAI/bge-small-en-v1.5")
+
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "for", "from",
+    "have", "how", "i", "if", "in", "is", "it", "its", "just", "let", "me", "my", "of",
+    "on", "or", "our", "so", "that", "the", "this", "to", "up", "we", "what", "when",
+    "where", "which", "who", "why", "with", "you", "your",
+}
+
+_SKILL_INTENT_TERMS = {"skill", "skills", "plugin", "plugins", "hook", "hooks", "filter", "marketplace"}
+_GENERIC_LOW_SIGNAL_TERMS = {"break", "broke", "broken", "done", "happen", "happened", "ok", "okay", "yes", "no"}
 
 # Persistent storage
 DATA_DIR = Path(os.environ.get("SEMANTIC_SKILLS_DATA_DIR", "/opt/data/semantic-skills"))
 INDEX_FILE = DATA_DIR / "skill_vectors.npz"
 META_FILE = DATA_DIR / "skill_meta.json"
 MANIFEST_FILE = DATA_DIR / "skill_manifest.json"
+STATS_FILE = Path(os.environ.get(
+    "SKILL_LIBRARY_STATS_FILE",
+    str(Path.home() / ".hermes" / "skill-library" / "stats" / "skill_usage.json"),
+))
 
 # Singleton state
 _model = None
@@ -271,8 +291,70 @@ def _build_or_load_index():
 
 
 # ---------------------------------------------------------------------------
-# Search
+# Search / telemetry
 # ---------------------------------------------------------------------------
+
+def _record_surfaced(results: list, session_id: str = "", platform: str = "") -> None:
+    """Track how often each skill is surfaced by semantic search.
+
+    Best-effort only: telemetry failure must never block prompt assembly.
+    """
+    if not results:
+        return
+    try:
+        import fcntl
+
+        STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = STATS_FILE.with_suffix(STATS_FILE.suffix + ".lock")
+        with lock_path.open("a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                data = json.loads(STATS_FILE.read_text(encoding="utf-8")) if STATS_FILE.exists() else {}
+            except Exception:
+                data = {}
+            skills = data.setdefault("skills", {})
+            now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            for result in results:
+                name = str(result.get("name") or "").strip()
+                if not name:
+                    continue
+                rec = skills.setdefault(name, {})
+                rec["surfaced_count"] = int(rec.get("surfaced_count", 0)) + 1
+                rec["last_surfaced_at"] = now
+                rec["last_surfaced_score"] = float(result.get("score", 0.0))
+                rec["last_surfaced_category"] = result.get("category", "")
+                if session_id:
+                    rec["last_surfaced_session"] = session_id
+                if platform:
+                    rec["last_surfaced_platform"] = platform
+            data["updatedAt"] = now
+            tmp = STATS_FILE.with_suffix(STATS_FILE.suffix + ".tmp")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            tmp.replace(STATS_FILE)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        logger.debug("Could not record semantic skill telemetry", exc_info=True)
+
+
+def _tokens(text: str) -> set:
+    """Return meaningful lowercase tokens for lightweight lexical guards."""
+    import re
+
+    return {
+        token
+        for token in re.findall(r"[a-z0-9][a-z0-9_-]{1,}", text.lower())
+        if token not in _STOPWORDS
+    }
+
+
+def _is_low_signal_query(query_tokens: set) -> bool:
+    """Avoid surfacing random skills for acknowledgements/status nudges."""
+    if not query_tokens:
+        return True
+    if query_tokens <= _GENERIC_LOW_SIGNAL_TERMS:
+        return True
+    return len(query_tokens) < 3 and not (query_tokens & _SKILL_INTENT_TERMS)
+
 
 def search_skills(query: str) -> list:
     """Search skills by semantic similarity to query.
@@ -284,6 +366,11 @@ def search_skills(query: str) -> list:
     
     if _index is None or not _metadata:
         return []
+
+    query_tokens = _tokens(query)
+    if _is_low_signal_query(query_tokens):
+        return []
+    skill_intent = bool(query_tokens & _SKILL_INTENT_TERMS)
     
     # Embed query
     q_vec = _embed([query])[0]
@@ -291,19 +378,57 @@ def search_skills(query: str) -> list:
     # Cosine similarity (vectors are pre-normalized)
     scores = _index @ q_vec
     
-    # Filter and sort
-    results = []
+    min_score = max(THRESHOLD, 0.60)
+
+    # Filter and sort. The embedding score finds candidates; lexical overlap
+    # prevents generic semantically-adjacent skills from surfacing on vague turns.
+    candidates = []
     for i, score in enumerate(scores):
-        if score >= THRESHOLD:
-            results.append({
-                "name": _metadata[i]["name"],
-                "description": _metadata[i]["description"],
-                "category": _metadata[i]["category"],
-                "score": float(score),
-            })
+        if score < min_score:
+            continue
+
+        metadata = _metadata[i]
+        searchable = f"{metadata['name']} {metadata['description']} {metadata['category']}"
+        skill_tokens = _tokens(searchable)
+        overlap = query_tokens & skill_tokens
+        intent_overlap = skill_tokens & _SKILL_INTENT_TERMS
+
+        # If the user is explicitly talking about skills/plugins/hooks, keep
+        # candidates that are themselves about the skill system or marketplace.
+        # This blocks unrelated "search" matches like Obsidian notes.
+        if skill_intent and not intent_overlap:
+            continue
+
+        # For normal turns, require either direct lexical support or a strong
+        # vector score. This keeps recall for clear task matches while dropping
+        # random matches from vague status messages.
+        if not skill_intent and len(overlap) < 2 and score < (min_score + 0.08):
+            continue
+
+        lexical_bonus = min(0.06, 0.015 * len(overlap))
+        name_bonus = 0.04 if query_tokens & _tokens(metadata["name"]) else 0.0
+        adjusted_score = float(score + lexical_bonus + name_bonus)
+        candidates.append({
+            "name": metadata["name"],
+            "description": metadata["description"],
+            "category": metadata["category"],
+            "score": float(score),
+            "adjusted_score": adjusted_score,
+        })
     
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:MAX_RESULTS]
+    candidates.sort(key=lambda x: x["adjusted_score"], reverse=True)
+
+    # Keep tight clusters only. If the top match is substantially better, don't
+    # drag in weak tail matches just because they crossed the raw threshold.
+    if candidates:
+        top = candidates[0]["adjusted_score"]
+        candidates = [r for r in candidates if r["adjusted_score"] >= top - 0.05]
+
+    results = []
+    for result in candidates[:MAX_RESULTS]:
+        result.pop("adjusted_score", None)
+        results.append(result)
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +472,8 @@ def _on_pre_llm_call(
             logger.debug("Semantic skills: no matches for query (%.1fms)", elapsed * 1000)
             return {}
         
+        _record_surfaced(results, session_id=session_id, platform=platform)
+
         # Format results for injection
         lines = ["[Semantic skill matches for this message:]"]
         for r in results:

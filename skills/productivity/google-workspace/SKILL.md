@@ -1,6 +1,6 @@
 ---
 name: google-workspace
-description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs integration for Hermes. Uses Hermes-managed OAuth2 setup, prefers the Google Workspace CLI (`gws`) when available for broader API coverage, and falls back to the Python client libraries otherwise.
+description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs integration for Hermes. For Aaron/Lawyer Incorporated, use the Domain-Wide Delegation service-account helper (`scripts/google_api.py`) at `~/.hermes/auth/gws-sa.json`; do not use OAuth or `gws auth login` for Gmail unless explicitly requested.
 version: 1.0.0
 author: Nous Research
 license: MIT
@@ -13,7 +13,7 @@ metadata:
 
 # Google Workspace
 
-Gmail, Calendar, Drive, Contacts, Sheets, and Docs — through Hermes-managed OAuth and a thin CLI wrapper. When `gws` is installed, the skill uses it as the execution backend for broader Google Workspace coverage; otherwise it falls back to the bundled Python client implementation.
+Gmail, Calendar, Drive, Contacts, Sheets, and Docs. In Aaron's environment, Gmail access is through a service account with Domain-Wide Delegation (DWD), not user OAuth. Use the bundled `scripts/google_api.py` helper directly; it reads `~/.hermes/auth/gws-sa.json` and impersonates Aaron. Do **not** tell Aaron to run `gws auth login` for Gmail unless he explicitly asks for user-OAuth mode.
 
 ## References
 
@@ -21,8 +21,8 @@ Gmail, Calendar, Drive, Contacts, Sheets, and Docs — through Hermes-managed OA
 
 ## Scripts
 
-- `scripts/setup.py` — OAuth2 setup (run once to authorize)
-- `scripts/google_api.py` — compatibility wrapper CLI. It prefers `gws` for operations when available, while preserving Hermes' existing JSON output contract.
+- `scripts/setup.py` — legacy OAuth2 setup (only use for non-DWD/user-OAuth environments)
+- `scripts/google_api.py` — primary Workspace CLI for this machine. When `~/.hermes/auth/gws-sa.json` exists, it bypasses `gws` and uses Domain-Wide Delegation service-account impersonation directly.
 
 ## First-Time Setup
 
@@ -200,11 +200,20 @@ expiry. Audit logs still attribute calls to the impersonated user.
 
 ## Usage
 
-All commands go through the API script. Set `GAPI` as a shorthand:
+All commands go through the API script. On this machine, prefer the repo copy so DWD behavior is explicit:
 
 ```bash
-GAPI="python ${HERMES_HOME:-$HOME/.hermes}/skills/productivity/google-workspace/scripts/google_api.py"
+GAPI="python3 $HOME/Github/Roscoe-hermes/skills/productivity/google-workspace/scripts/google_api.py"
 ```
+
+Preflight:
+
+```bash
+test -f "$HOME/.hermes/auth/gws-sa.json"
+$GAPI gmail search "in:inbox" --max 1
+```
+
+If `gws gmail ...` fails with `invalid_grant` / `invalid_rapt`, that does **not** mean Gmail is unavailable. Switch to `$GAPI` above; `gws` uses user OAuth, while `$GAPI` uses the service account/DWD path.
 
 ### Gmail
 
@@ -304,9 +313,9 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 ## Rules
 
-1. **Never send email or create/delete events without confirming with the user first.** Show the draft content and ask for approval.
-2. **Check auth before first use** — run `setup.py --check`. If it fails, guide the user through setup.
-3. **Use the Gmail search syntax reference** for complex queries — load it with `skill_view("google-workspace", file_path="references/gmail-search-syntax.md")`.
+1. **For Aaron/Lawyer Incorporated Gmail, use `$GAPI` / `google_api.py` with DWD first. Do not ask Aaron to reauth or run `gws auth login` just because `gws`/OAuth fails.**
+2. **Never send email or create/delete events without confirming with the user first.** Show the draft content and ask for approval.
+3. **For complex Gmail queries, use the Gmail search syntax reference** — load `references/gmail-search-syntax.md`.
 4. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g., `2026-03-01T10:00:00-06:00`) or UTC (`Z`).
 5. **Respect rate limits** — avoid rapid-fire sequential API calls. Batch reads when possible.
 
@@ -314,12 +323,12 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 | Problem | Fix |
 |---------|-----|
-| `NOT_AUTHENTICATED` | Run setup Steps 2-5 above |
-| `REFRESH_FAILED` | Token revoked or expired — redo Steps 3-5 |
-| `HttpError 403: Insufficient Permission` | Missing API scope — `$GSETUP --revoke` then redo Steps 3-5 |
-| `HttpError 403: Access Not Configured` | API not enabled — user needs to enable it in Google Cloud Console |
-| `ModuleNotFoundError` | Run `$GSETUP --install-deps` |
-| Advanced Protection blocks auth | Workspace admin must allowlist the OAuth client ID |
+| `NOT_AUTHENTICATED` from `gws` or `invalid_grant` / `invalid_rapt` | Do **not** ask Aaron to reauth first. Use `python3 $HOME/Github/Roscoe-hermes/skills/productivity/google-workspace/scripts/google_api.py` so the DWD service account is used. |
+| DWD preflight fails | Verify `~/.hermes/auth/gws-sa.json` exists, is chmod 600, has a `subject`, and the Workspace DWD scopes match exactly. |
+| `HttpError 403: Insufficient Permission` | Missing DWD scope or API not enabled — check Workspace Admin DWD scopes and GCP APIs. |
+| `HttpError 403: Access Not Configured` | API not enabled — enable it in Google Cloud Console for the service-account project. |
+| `ModuleNotFoundError` | Run `$GSETUP --install-deps` or install the missing google client package in the active venv. |
+| Advanced Protection blocks OAuth auth | Only relevant in legacy OAuth mode; DWD should bypass user consent flows. |
 
 ## Revoking Access
 
