@@ -75,3 +75,7 @@ website/static/api/skills-index.json
 
 # Git worktrees
 .worktrees/
+.gstack/
+
+# Local agent state
+.claude/
