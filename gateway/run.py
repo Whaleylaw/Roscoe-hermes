@@ -6265,23 +6265,17 @@ class GatewayRunner:
                     # 85% * 1.4 = 119% of context — which exceeds the model's limit
                     # and prevented hygiene from ever firing for ~200K models (GLM-5).
 
-                # Hard safety valve: force compression on extreme message
-                # counts ONLY when we do not have actual prompt-token usage.
-                #
-                # Why: with healthy API usage we usually have
-                # session_entry.last_prompt_tokens (actual). In that case,
-                # token thresholds are more reliable than message counts and
-                # we should not compress merely because a long-lived chat has
-                # many short turns.
-                #
-                # Keep the hard cap for estimate-only mode to break the
-                # disconnect spiral where token data is unavailable and
-                # transcript growth can run away.  Threshold configurable via
-                # compression.hygiene_hard_message_limit. (#2153)
+                # Hard safety valve: force compression if message count is
+                # extreme, regardless of token estimates.  This breaks the
+                # death spiral where API disconnects prevent token data
+                # collection, which prevents compression, which causes more
+                # disconnects.  Configurable via
+                # compression.hygiene_hard_message_limit (#2153).
                 _HARD_MSG_LIMIT = _hyg_hard_msg_limit
-                _needs_compress = _approx_tokens >= _compress_token_threshold
-                if _token_source == "estimated":
-                    _needs_compress = _needs_compress or _msg_count >= _HARD_MSG_LIMIT
+                _needs_compress = (
+                    _approx_tokens >= _compress_token_threshold
+                    or _msg_count >= _HARD_MSG_LIMIT
+                )
 
                 if _needs_compress:
                     logger.info(

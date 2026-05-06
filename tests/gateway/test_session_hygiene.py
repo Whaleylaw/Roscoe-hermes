@@ -485,6 +485,7 @@ async def test_session_hygiene_warns_user_when_summary_generation_fails(monkeypa
         chat_type="group",
     )
     runner.session_store.load_transcript.return_value = _make_history(6, content_size=400)
+    runner.session_store.load_agent_context.return_value = _make_history(6, content_size=400)
     runner.session_store.has_any_sessions.return_value = True
     runner.session_store.rewrite_transcript = MagicMock()
     runner.session_store.append_to_transcript = MagicMock()
@@ -604,6 +605,7 @@ async def test_session_hygiene_informs_user_when_aux_model_fails_but_recovers(mo
         chat_type="group",
     )
     runner.session_store.load_transcript.return_value = _make_history(6, content_size=400)
+    runner.session_store.load_agent_context.return_value = _make_history(6, content_size=400)
     runner.session_store.has_any_sessions.return_value = True
     runner.session_store.rewrite_transcript = MagicMock()
     runner.session_store.append_to_transcript = MagicMock()
@@ -733,6 +735,7 @@ async def test_session_hygiene_honors_configurable_hard_message_limit(
     # 12 messages: below 400 default → no compression without override,
     # but above the configured limit of 10 → should compress.
     runner.session_store.load_transcript.return_value = _make_history(12, content_size=40)
+    runner.session_store.load_agent_context.return_value = _make_history(12, content_size=40)
     runner.session_store.has_any_sessions.return_value = True
     runner.session_store.rewrite_transcript = MagicMock()
     runner.session_store.append_to_transcript = MagicMock()
@@ -836,6 +839,7 @@ async def test_session_hygiene_default_hard_message_limit_does_not_fire_at_12_me
         chat_type="private",
     )
     runner.session_store.load_transcript.return_value = _make_history(12, content_size=40)
+    runner.session_store.load_agent_context.return_value = _make_history(12, content_size=40)
     runner.session_store.has_any_sessions.return_value = True
     runner.session_store.rewrite_transcript = MagicMock()
     runner.session_store.append_to_transcript = MagicMock()

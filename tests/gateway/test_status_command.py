@@ -45,6 +45,7 @@ def _make_runner(session_entry: SessionEntry, *, platform: Platform = Platform.T
     runner.session_store = MagicMock()
     runner.session_store.get_or_create_session.return_value = session_entry
     runner.session_store.load_transcript.return_value = []
+    runner.session_store.load_agent_context.return_value = []
     runner.session_store.has_any_sessions.return_value = True
     runner.session_store.append_to_transcript = MagicMock()
     runner.session_store.rewrite_transcript = MagicMock()
@@ -299,6 +300,7 @@ async def test_first_run_slack_home_channel_onboarding_uses_parent_command(monke
     )
     runner = _make_runner(session_entry, platform=Platform.SLACK)
     runner.session_store.load_transcript.return_value = []
+    runner.session_store.load_agent_context.return_value = []
     runner.session_store.has_any_sessions.return_value = False
     runner._run_agent = AsyncMock(
         return_value={
@@ -343,6 +345,7 @@ async def test_first_run_non_slack_home_channel_onboarding_keeps_direct_command(
     )
     runner = _make_runner(session_entry, platform=Platform.TELEGRAM)
     runner.session_store.load_transcript.return_value = []
+    runner.session_store.load_agent_context.return_value = []
     runner.session_store.has_any_sessions.return_value = False
     runner._run_agent = AsyncMock(
         return_value={
