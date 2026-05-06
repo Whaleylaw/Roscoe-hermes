@@ -129,6 +129,13 @@ class TestSendMessageTool:
             media_files=[],
         )
 
+    def test_slack_channel_id_is_explicit_target(self):
+        chat_id, thread_id, is_explicit = _parse_target_ref("slack", "C0AKWQHKPPV")
+
+        assert chat_id == "C0AKWQHKPPV"
+        assert thread_id is None
+        assert is_explicit is True
+
     def test_display_label_target_resolves_via_channel_directory(self, tmp_path):
         config, telegram_cfg = _make_config()
         cache_file = tmp_path / "channel_directory.json"

@@ -102,6 +102,38 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub"))
 _REMOTE_ENV_BACKENDS = frozenset({"docker", "singularity", "modal", "ssh", "daytona"})
 _secret_capture_callback = None
+_SKILL_STATS_FILE = HERMES_HOME / "skill-library" / "stats" / "skill_usage.json"
+
+
+def _record_skill_view_telemetry(skill_name: str, *, file_path: str | None = None) -> None:
+    """Best-effort counter for full skill loads via skill_view()."""
+    if not skill_name:
+        return
+    try:
+        import fcntl
+        from datetime import datetime, timezone
+
+        _SKILL_STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = _SKILL_STATS_FILE.with_suffix(_SKILL_STATS_FILE.suffix + ".lock")
+        with lock_path.open("a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                data = json.loads(_SKILL_STATS_FILE.read_text(encoding="utf-8")) if _SKILL_STATS_FILE.exists() else {}
+            except Exception:
+                data = {}
+            skills = data.setdefault("skills", {})
+            rec = skills.setdefault(skill_name, {})
+            rec["view_count"] = int(rec.get("view_count", 0)) + 1
+            rec["last_viewed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            if file_path:
+                rec["last_viewed_file"] = file_path
+            data["updatedAt"] = rec["last_viewed_at"]
+            tmp = _SKILL_STATS_FILE.with_suffix(_SKILL_STATS_FILE.suffix + ".tmp")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            tmp.replace(_SKILL_STATS_FILE)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        logger.debug("Could not record skill_view telemetry for %s", skill_name, exc_info=True)
 
 
 def load_env() -> Dict[str, str]:
@@ -879,6 +911,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                         },
                         ensure_ascii=False,
                     )
+                _record_skill_view_telemetry(name, file_path=file_path)
                 return _serve_plugin_skill(plugin_skill_md, namespace, bare)
 
             # Plugin exists but this specific skill is missing?
@@ -1124,6 +1157,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                     ensure_ascii=False,
                 )
 
+            _record_skill_view_telemetry(str(resolved_name), file_path=file_path)
             return json.dumps(
                 {
                     "success": True,
@@ -1312,6 +1346,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
         if capture_result["gateway_setup_hint"]:
             result["gateway_setup_hint"] = capture_result["gateway_setup_hint"]
 
+        _record_skill_view_telemetry(str(skill_name), file_path=file_path)
         if setup_needed:
             missing_items = [
                 f"env ${env_name}" for env_name in remaining_missing_required_envs

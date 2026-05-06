@@ -190,6 +190,7 @@ def sync_skills(quiet: bool = False) -> dict:
 
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
     manifest = _read_manifest()
+    original_manifest = dict(manifest)
     bundled_skills = _discover_bundled_skills(bundled_dir)
     bundled_names = {name for name, _ in bundled_skills}
 
@@ -305,7 +306,8 @@ def sync_skills(quiet: bool = False) -> dict:
             except (OSError, IOError) as e:
                 logger.debug("Could not copy %s: %s", desc_md, e)
 
-    _write_manifest(manifest)
+    if manifest != original_manifest:
+        _write_manifest(manifest)
 
     return {
         "copied": copied,
