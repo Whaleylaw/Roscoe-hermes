@@ -56,3 +56,115 @@ def test_is_langfuse_enabled_uses_readiness(monkeypatch):
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     lf = _reload_module()
     assert lf.is_langfuse_enabled() is True
+
+
+def test_set_current_trace_io_noop_when_disabled(monkeypatch):
+    lf = _reload_module()
+    monkeypatch.setattr(lf, "is_langfuse_enabled", lambda: False)
+
+    lf.set_current_trace_io(input="hello", output="world")
+
+
+def test_set_current_trace_io_calls_sdk_when_enabled(monkeypatch):
+    lf = _reload_module()
+
+    calls = {}
+
+    class _FakeLangfuse:
+        def get_current_trace_id(self):
+            return "trace_123"
+
+        def set_current_trace_io(self, *, input=None, output=None):
+            calls["input"] = input
+            calls["output"] = output
+
+    monkeypatch.setattr(lf, "is_langfuse_enabled", lambda: True)
+    monkeypatch.setattr(lf, "get_langfuse", lambda: _FakeLangfuse())
+
+    lf.set_current_trace_io(input="in", output="out")
+
+    assert calls == {"input": "in", "output": "out"}
+
+
+def test_set_current_generation_output_noop_when_disabled(monkeypatch):
+    lf = _reload_module()
+    monkeypatch.setattr(lf, "is_langfuse_enabled", lambda: False)
+
+    lf.set_current_generation_output("out")
+
+
+def test_set_current_generation_output_calls_sdk_when_enabled(monkeypatch):
+    lf = _reload_module()
+
+    calls = {}
+
+    class _FakeLangfuse:
+        def update_current_generation(self, *, output=None):
+            calls["output"] = output
+
+    monkeypatch.setattr(lf, "is_langfuse_enabled", lambda: True)
+    monkeypatch.setattr(lf, "get_langfuse", lambda: _FakeLangfuse())
+
+    lf.set_current_generation_output("assistant output")
+
+    assert calls == {"output": "assistant output"}
+
+
+def test_set_current_trace_session_context_updates_current_span_metadata(monkeypatch):
+    lf = _reload_module()
+
+    calls = {}
+
+    class _FakeLangfuse:
+        def get_current_trace_id(self):
+            return "trace_abc"
+
+        def update_current_span(self, *, metadata=None, **kwargs):
+            calls["metadata"] = metadata
+            calls["kwargs"] = kwargs
+
+    monkeypatch.setattr(lf, "is_langfuse_enabled", lambda: True)
+    monkeypatch.setattr(lf, "get_langfuse", lambda: _FakeLangfuse())
+    monkeypatch.setattr(lf, "get_session_env", lambda name, default="": {
+        "HERMES_SESSION_KEY": "agent:main:slack:group:C0AGJKT10QM",
+        "HERMES_SESSION_PLATFORM": "slack",
+        "HERMES_SESSION_CHAT_ID": "C0AGJKT10QM",
+        "HERMES_SESSION_THREAD_ID": "",
+        "HERMES_SESSION_USER_ID": "U123",
+    }.get(name, default))
+    monkeypatch.setenv("HERMES_CHANNEL_CWD", "/tmp/FirmVault/cases/frances-whitis")
+    monkeypatch.setenv("HERMES_SESSION_ISOLATED", "true")
+
+    lf.set_current_trace_session_context()
+
+    assert calls["metadata"]["hermes_session_key"] == "agent:main:slack:group:C0AGJKT10QM"
+    assert calls["metadata"]["user_id"] == "U123"
+    assert calls["metadata"]["chat_id"] == "C0AGJKT10QM"
+    assert calls["metadata"]["session_isolated"] is True
+
+
+def test_set_current_trace_session_context_noop_without_active_trace(monkeypatch):
+    lf = _reload_module()
+
+    calls = {"count": 0}
+
+    class _FakeLangfuse:
+        def get_current_trace_id(self):
+            return None
+
+        def update_current_span(self, *, metadata=None, **kwargs):
+            calls["count"] += 1
+
+    monkeypatch.setattr(lf, "is_langfuse_enabled", lambda: True)
+    monkeypatch.setattr(lf, "get_langfuse", lambda: _FakeLangfuse())
+    monkeypatch.setattr(lf, "get_session_env", lambda name, default="": {
+        "HERMES_SESSION_KEY": "agent:main:telegram:dm:7527183362",
+        "HERMES_SESSION_PLATFORM": "telegram",
+        "HERMES_SESSION_CHAT_ID": "7527183362",
+        "HERMES_SESSION_THREAD_ID": "",
+        "HERMES_SESSION_USER_ID": "",
+    }.get(name, default))
+
+    lf.set_current_trace_session_context()
+
+    assert calls["count"] == 0

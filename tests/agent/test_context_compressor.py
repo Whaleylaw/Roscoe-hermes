@@ -241,6 +241,116 @@ class TestSummaryFailureCooldown:
         assert second is None
         assert mock_call.call_count == 1
 
+    def test_summary_model_not_found_falls_back_to_main_model_and_retries(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="main/model",
+                summary_model_override="missing/model",
+                quiet_mode=True,
+            )
+
+        messages = [
+            {"role": "user", "content": "do something"},
+            {"role": "assistant", "content": "ok"},
+        ]
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Summary from fallback"
+
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=[Exception("model_not_found: missing/model"), mock_response],
+        ) as mock_call:
+            summary = c._generate_summary(messages, focus_topic="oauth")
+
+        assert summary is not None
+        assert summary.startswith(SUMMARY_PREFIX)
+        assert mock_call.call_count == 2
+        # First attempt requested the configured summary model.
+        assert mock_call.call_args_list[0].kwargs.get("model") == "missing/model"
+        # Retry should use main model routing (no explicit model override).
+        assert "model" not in mock_call.call_args_list[1].kwargs
+
+    def test_context_window_error_retries_with_smaller_input(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+
+        messages = []
+        for i in range(60):
+            messages.append({"role": "user", "content": f"user message {i} " + ("x" * 300)})
+            messages.append({"role": "assistant", "content": f"assistant message {i} " + ("y" * 300)})
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Compacted summary"
+
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=[Exception("Your input exceeds the context window of this model"), mock_response],
+        ) as mock_call:
+            summary = c._generate_summary(messages)
+
+        assert summary is not None
+        assert summary.startswith(SUMMARY_PREFIX)
+        assert mock_call.call_count == 2
+        first_prompt = mock_call.call_args_list[0].kwargs["messages"][0]["content"]
+        second_prompt = mock_call.call_args_list[1].kwargs["messages"][0]["content"]
+        assert len(second_prompt) < len(first_prompt)
+
+    def test_string_above_max_length_retries_with_smaller_input(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+
+        messages = []
+        for i in range(100):
+            # Intentionally large per-turn payload so first call triggers
+            # provider-side max-input-length error path.
+            messages.append({"role": "user", "content": f"u{i}:" + ("x" * 5000)})
+            messages.append({"role": "assistant", "content": f"a{i}:" + ("y" * 5000)})
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Recovered summary"
+
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=[Exception("code=string_above_max_length: maximum length exceeded"), mock_response],
+        ) as mock_call:
+            summary = c._generate_summary(messages)
+
+        assert summary is not None
+        assert summary.startswith(SUMMARY_PREFIX)
+        assert mock_call.call_count == 2
+        first_prompt = mock_call.call_args_list[0].kwargs["messages"][0]["content"]
+        second_prompt = mock_call.call_args_list[1].kwargs["messages"][0]["content"]
+        assert len(second_prompt) < len(first_prompt)
+
+    def test_summary_prompt_is_char_bounded_before_first_attempt(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+
+        # Create many giant turns and an oversized previous summary to emulate
+        # the production drift case where compaction input exceeded provider caps.
+        c._previous_summary = "p" * 800_000
+        messages = []
+        for i in range(300):
+            messages.append({"role": "user", "content": f"u{i}:" + ("x" * 12_000)})
+            messages.append({"role": "assistant", "content": f"a{i}:" + ("y" * 12_000)})
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Bounded summary"
+
+        with patch("agent.context_compressor.call_llm", return_value=mock_response) as mock_call:
+            summary = c._generate_summary(messages)
+
+        assert summary is not None
+        assert summary.startswith(SUMMARY_PREFIX)
+        sent_prompt = mock_call.call_args.kwargs["messages"][0]["content"]
+        # Allow template overhead beyond bounded content blocks.
+        assert len(sent_prompt) < (c._SUMMARY_INPUT_MAX_CHARS + c._PREVIOUS_SUMMARY_MAX_CHARS + 50_000)
+
 
 class TestSummaryPrefixNormalization:
     def test_legacy_prefix_is_replaced(self):

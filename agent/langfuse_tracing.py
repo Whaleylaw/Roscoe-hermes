@@ -15,6 +15,8 @@ import logging
 import os
 from typing import Dict, Any
 
+from gateway.session_context import get_session_env
+
 logger = logging.getLogger(__name__)
 
 LANGFUSE_REQUIRED_ENV = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
@@ -174,6 +176,90 @@ def flush_langfuse():
             _langfuse_instance.flush()
         except Exception as e:
             logger.warning("Langfuse flush failed: %s", e)
+
+
+def set_current_trace_io(*, input: Any = None, output: Any = None) -> None:
+    """Attach trace-level input/output to the current Langfuse trace.
+
+    This is best-effort and fail-open. It helps when provider-level auto-
+    instrumentation emits spans but omits final assistant text in the legacy
+    trace-level output field used by some Langfuse views.
+    """
+    if not is_langfuse_enabled():
+        return
+    try:
+        lf = get_langfuse()
+        if lf is None:
+            return
+        # Avoid noisy "No active span in current context" warnings when called
+        # outside an instrumented model span.
+        if not getattr(lf, "get_current_trace_id", lambda: None)():
+            return
+        lf.set_current_trace_io(input=input, output=output)
+    except Exception as e:
+        logger.debug("Langfuse set_current_trace_io failed: %s", e)
+
+
+def set_current_generation_output(output: Any) -> None:
+    """Attach assistant output to the current generation/span when available.
+
+    Some Langfuse UIs primarily display generation-level output. On certain
+    streaming/instrumented paths the provider span may exist but not include
+    final text unless it is updated explicitly.
+    """
+    if not is_langfuse_enabled():
+        return
+    try:
+        lf = get_langfuse()
+        if lf is None:
+            return
+        lf.update_current_generation(output=output)
+    except Exception as e:
+        logger.debug("Langfuse update_current_generation failed: %s", e)
+
+
+def set_current_trace_session_context() -> None:
+    """Attach gateway session metadata to the active Langfuse span/trace.
+
+    Langfuse Python SDK v4 exposes ``update_current_span`` and trace I/O helpers,
+    but not a generic ``update_current_trace(session_id=...)`` mutator. We
+    therefore attach session context as span metadata (queryable in Langfuse)
+    and mirror text I/O via ``set_current_trace_io`` elsewhere.
+
+    Best-effort and fail-open.
+    """
+    if not is_langfuse_enabled():
+        return
+
+    session_key = (get_session_env("HERMES_SESSION_KEY", "") or "").strip()
+    if not session_key:
+        return
+
+    platform = (get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip()
+    chat_id = (get_session_env("HERMES_SESSION_CHAT_ID", "") or "").strip()
+    thread_id = (get_session_env("HERMES_SESSION_THREAD_ID", "") or "").strip()
+    user_id = (get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
+
+    metadata = {
+        "hermes_session_key": session_key,
+        "platform": platform,
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+        "channel_cwd": (os.getenv("HERMES_CHANNEL_CWD", "") or "").strip(),
+        "session_isolated": (os.getenv("HERMES_SESSION_ISOLATED", "") or "").strip().lower() in ("1", "true", "yes"),
+    }
+    if user_id:
+        metadata["user_id"] = user_id
+
+    try:
+        lf = get_langfuse()
+        if lf is None:
+            return
+        if not getattr(lf, "get_current_trace_id", lambda: None)():
+            return
+        lf.update_current_span(metadata=metadata)
+    except Exception as e:
+        logger.debug("Langfuse update_current_span(session metadata) failed: %s", e)
 
 
 def shutdown_langfuse():
