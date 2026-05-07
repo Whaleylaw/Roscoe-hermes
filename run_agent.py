@@ -9399,16 +9399,15 @@ class AIAgent:
             f"{approx_tokens:,}" if approx_tokens else "unknown", self.model,
             focus_topic,
         )
-        # Pre-compression memory flush: let the model save memories before they're lost
-        if self.tool_progress_callback:
-            try:
-                self.tool_progress_callback(
-                    "status.update", "flush_memories",
-                    "Saving memories before compaction…", None,
-                )
-            except Exception:
-                pass
-        self.flush_memories(messages, min_turns=0)
+        # Pre-compression memory handling is now owned by the background review
+        # loop (every 10 user turns on CLI and gateway) which writes memories
+        # asynchronously without blocking the live turn or invalidating prompt
+        # caching.  The obsolete flush_memories path was removed upstream in
+        # PR #15696 (commit ea01bdceb) but was accidentally re-introduced by
+        # a local merge on 2026-05-05 (commit bb7f18469).  Keeping the call
+        # site here produces 'AttributeError: AIAgent has no attribute
+        # flush_memories' every time compression fires, which the background
+        # review reports as '⚠ Auxiliary background review failed'.
 
         # Notify external memory provider before compression discards context
         if self._memory_manager:
