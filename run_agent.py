@@ -6024,8 +6024,23 @@ class AIAgent:
         This avoids relying on "active span" timing by embedding case/session
         identifiers directly into model request metadata, which Langfuse
         instrumentation can persist on traced generations.
+
+        Only OpenAI and OpenRouter accept the ``metadata`` field on chat
+        completions; other providers (custom endpoints, some Anthropic
+        proxies) return 400 ``Unsupported parameter: metadata``.  We gate
+        injection on the resolved base_url so swapping in a fallback model
+        with a stricter endpoint doesn't break the request.
         """
         try:
+            base_url = (getattr(self, "base_url", "") or "").lower()
+            _supports_metadata = (
+                not base_url
+                or "openai.com" in base_url
+                or "openrouter.ai" in base_url
+            )
+            if not _supports_metadata:
+                return api_kwargs
+
             from gateway.session_context import get_session_env as _get_session_env
             session_key = (_get_session_env("HERMES_SESSION_KEY", "") or "").strip()
             if not session_key:
