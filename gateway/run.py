@@ -6632,19 +6632,37 @@ class GatewayRunner:
             }
             await self.hooks.emit("agent:start", hook_ctx)
 
-            # Run the agent
-            agent_result = await self._run_agent(
-                message=message_text,
-                context_prompt=context_prompt,
-                history=history,
-                source=source,
-                session_id=session_entry.session_id,
-                session_key=session_key,
-                run_generation=run_generation,
-                event_message_id=event.message_id,
-                channel_prompt=event.channel_prompt,
-                channel_cwd=event.channel_cwd,
-            )
+            # Run the agent.  If this event came from a channel-scoped cwd
+            # (Slack case channels), bind that cwd to the turn ContextVar for
+            # the duration of the run.  This is what makes AGENTS.md discovery
+            # and terminal/file tools use the case folder instead of the
+            # profile-wide workspace, without racing process-wide TERMINAL_CWD.
+            _turn_cwd_token = None
+            if event.channel_cwd:
+                try:
+                    from agent.turn_context import turn_cwd_var
+                    _turn_cwd_token = turn_cwd_var.set(event.channel_cwd)
+                except Exception:
+                    _turn_cwd_token = None
+            try:
+                agent_result = await self._run_agent(
+                    message=message_text,
+                    context_prompt=context_prompt,
+                    history=history,
+                    source=source,
+                    session_id=session_entry.session_id,
+                    session_key=session_key,
+                    run_generation=run_generation,
+                    event_message_id=event.message_id,
+                    channel_prompt=event.channel_prompt,
+                    channel_cwd=event.channel_cwd,
+                )
+            finally:
+                if _turn_cwd_token is not None:
+                    try:
+                        turn_cwd_var.reset(_turn_cwd_token)
+                    except Exception:
+                        pass
 
             # Stop persistent typing indicator now that the agent is done
             try:

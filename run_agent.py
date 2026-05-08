@@ -5158,7 +5158,7 @@ class AIAgent:
             # Per-turn override (e.g. Slack channel_cwds) wins so each case
             # channel loads its own AGENTS.md deterministically.
             from agent.turn_context import get_turn_cwd as _get_turn_cwd
-            _context_cwd = _get_turn_cwd() or os.getenv("TERMINAL_CWD") or None
+            _context_cwd = self._context_cwd or _get_turn_cwd() or os.getenv("TERMINAL_CWD") or None
             context_files_prompt = build_context_files_prompt(
                 cwd=_context_cwd, skip_soul=_soul_loaded)
             if context_files_prompt:
