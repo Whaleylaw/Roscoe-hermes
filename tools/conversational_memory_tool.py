@@ -268,7 +268,12 @@ def conversational_memory_resume(
         )
 
     try:
-        payload = _run_json_command(command, request)
+        payload = _run_json_command(
+            command,
+            request,
+            timeout_env="HERMES_CONVERSATIONAL_MEMORY_RESUME_TIMEOUT",
+            default_timeout=10.0,
+        )
     except Exception as exc:
         logger.warning("Conversational memory resume failed: %s", exc)
         return tool_error(f"Conversational memory resume failed: {exc}", success=False)
@@ -316,7 +321,12 @@ def conversational_memory_search(
     })
 
     try:
-        payload = _run_json_command(command, request)
+        payload = _run_json_command(
+            command,
+            request,
+            timeout_env="HERMES_CONVERSATIONAL_MEMORY_INJECT_TIMEOUT",
+            default_timeout=10.0,
+        )
     except Exception as exc:
         logger.warning("Conversational memory search failed: %s", exc)
         return tool_error(f"Conversational memory search failed: {exc}", success=False)
@@ -378,7 +388,12 @@ def conversational_memory_sleep_review(
     })
 
     try:
-        payload = _run_json_command(command, request)
+        payload = _run_json_command(
+            command,
+            request,
+            timeout_env="HERMES_CONVERSATIONAL_MEMORY_SLEEP_TIMEOUT",
+            default_timeout=60.0,
+        )
     except Exception as exc:
         logger.warning("Conversational memory sleep review failed: %s", exc)
         return tool_error(f"Conversational memory sleep review failed: {exc}", success=False)
@@ -436,7 +451,12 @@ def conversational_memory_proposal_review(
         })
 
     try:
-        payload = _run_json_command(command, request)
+        payload = _run_json_command(
+            command,
+            request,
+            timeout_env="HERMES_CONVERSATIONAL_MEMORY_PROPOSALS_TIMEOUT",
+            default_timeout=10.0,
+        )
     except Exception as exc:
         logger.warning("Conversational memory proposal review failed: %s", exc)
         return tool_error(f"Conversational memory proposal review failed: {exc}", success=False)
@@ -498,13 +518,19 @@ def _drop_none(values: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
 
 
-def _run_json_command(command: str, request: Dict[str, Any]) -> Dict[str, Any]:
+def _run_json_command(
+    command: str,
+    request: Dict[str, Any],
+    *,
+    timeout_env: str,
+    default_timeout: float,
+) -> Dict[str, Any]:
     completed = subprocess.run(
         shlex.split(command),
         input=json.dumps(request, sort_keys=True),
         text=True,
         capture_output=True,
-        timeout=_timeout_seconds(),
+        timeout=_timeout_seconds(timeout_env, default_timeout),
         check=True,
     )
     payload = json.loads(completed.stdout)
@@ -513,12 +539,12 @@ def _run_json_command(command: str, request: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def _timeout_seconds() -> float:
-    raw = os.environ.get("HERMES_CONVERSATIONAL_MEMORY_RESUME_TIMEOUT", "10")
+def _timeout_seconds(env_name: str, default_timeout: float) -> float:
+    raw = os.environ.get(env_name, str(default_timeout))
     try:
         return max(0.1, min(float(raw), 60.0))
     except (TypeError, ValueError):
-        return 10.0
+        return default_timeout
 
 
 registry.register(

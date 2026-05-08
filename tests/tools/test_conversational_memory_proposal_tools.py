@@ -1,6 +1,8 @@
 import json
 import sys
+from types import SimpleNamespace
 
+import tools.conversational_memory_tool as memory_tool
 from tools.conversational_memory_tool import (
     CONVERSATIONAL_MEMORY_PROPOSAL_REVIEW_SCHEMA,
     CONVERSATIONAL_MEMORY_SLEEP_REVIEW_SCHEMA,
@@ -92,6 +94,33 @@ def test_sleep_review_calls_configured_command(tmp_path, monkeypatch):
     assert result["proposed_box_ids"] == ["box_smith_pip"]
     assert result["proposal_ids"] == ["proposal_box_smith_pip"]
     assert result["proposed_trace_ids"] == ["trace_smith_pip"]
+
+
+def test_sleep_review_uses_sleep_timeout_env(monkeypatch):
+    captured = {}
+
+    def fake_run(*_args, **kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        return SimpleNamespace(stdout=json.dumps({
+            "ok": True,
+            "reviewedAt": "2026-05-08T10:00:00.000Z",
+            "updatedSummaryIds": [],
+            "updatedBoxIds": [],
+            "proposedBoxIds": [],
+            "proposalIds": [],
+            "proposedTraceIds": [],
+            "noopReason": "No summaries or boxes needed sleep review changes.",
+        }))
+
+    monkeypatch.setenv("HERMES_CONVERSATIONAL_MEMORY_SLEEP_COMMAND", "python sleep.py")
+    monkeypatch.setenv("HERMES_CONVERSATIONAL_MEMORY_SLEEP_TIMEOUT", "42")
+    monkeypatch.setenv("HERMES_CONVERSATIONAL_MEMORY_RESUME_TIMEOUT", "1")
+    monkeypatch.setattr(memory_tool.subprocess, "run", fake_run)
+
+    result = json.loads(conversational_memory_sleep_review())
+
+    assert result["success"] is True
+    assert captured["timeout"] == 42.0
 
 
 def test_proposal_review_lists_pending_proposals(tmp_path, monkeypatch):
