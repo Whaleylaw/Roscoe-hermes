@@ -38,6 +38,15 @@ python -m pytest -o addopts='' \
   tests/gateway/test_conversational_memory_live_loop.py
 ```
 
+Run a compact sleep-review automation pass for the isolated profile:
+
+```bash
+python scripts/run_memory_test_sleep_review.py \
+  --reviewed-at "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+```
+
+This wrapper intentionally refuses non-`memory-test` profile paths. It loads `/Users/aaronwhaley/.hermes/profiles/memory-test/.env`, runs sleep review, lists proposed memory-organization changes, and prints compact JSON for logs or scheduler output.
+
 Run a foreground search check:
 
 ```bash
