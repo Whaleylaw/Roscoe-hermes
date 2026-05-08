@@ -24,14 +24,20 @@ def test_create_memory_test_profile_writes_isolated_memory_config(tmp_path):
     env_text = (profile_home / ".env").read_text(encoding="utf-8")
     assert "HERMES_CONVERSATIONAL_MEMORY_DB=" in env_text
     assert f"npm --silent --prefix {cms_root}" in env_text
+    assert "API_SERVER_ENABLED=true" in env_text
+    assert "API_SERVER_HOST=127.0.0.1" in env_text
+    assert "API_SERVER_PORT=8765" in env_text
+    assert "API_SERVER_KEY=memory-test-local-key" in env_text
     assert "OPENROUTER_API_KEY=sk-or-test" in env_text
     assert "SLACK_BOT_TOKEN" not in env_text
     assert "TELEGRAM_BOT_TOKEN" not in env_text
-    assert "API_SERVER_KEY" not in env_text
 
     config_text = (profile_home / "config.yaml").read_text(encoding="utf-8")
     assert "provider: openrouter" in config_text
     assert f"cwd: {profile_home / 'workspace'}" in config_text
+    assert "platform_toolsets:" in config_text
+    assert "api_server:" in config_text
+    assert "    - memory" in config_text
 
 
 def test_create_memory_test_profile_can_omit_openrouter_key(tmp_path):

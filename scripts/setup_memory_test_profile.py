@@ -81,6 +81,9 @@ def _config_yaml(workspace: Path) -> str:
     toolsets:
       - hermes-cli
       - memory
+    platform_toolsets:
+      api_server:
+        - memory
     agent:
       max_turns: 10000
       gateway_timeout: 1800
@@ -169,6 +172,12 @@ def _env_file(profile_home: Path, cms_root: Path, memory_db: Path, openrouter_ap
         f'HERMES_CONVERSATIONAL_MEMORY_PROPOSALS_LIST_COMMAND="{command} run hermes:proposals:list -- --db {memory_db}"',
         f'HERMES_CONVERSATIONAL_MEMORY_PROPOSALS_APPROVE_COMMAND="{command} run hermes:proposals:approve -- --db {memory_db}"',
         f'HERMES_CONVERSATIONAL_MEMORY_PROPOSALS_REJECT_COMMAND="{command} run hermes:proposals:reject -- --db {memory_db}"',
+        "",
+        "API_SERVER_ENABLED=true",
+        "API_SERVER_HOST=127.0.0.1",
+        "API_SERVER_PORT=8765",
+        "API_SERVER_KEY=memory-test-local-key",
+        "API_SERVER_MODEL_NAME=memory-test",
     ]
     if openrouter_api_key:
         lines.extend(["", f"OPENROUTER_API_KEY={openrouter_api_key}"])
@@ -245,7 +254,9 @@ def _readme(profile_home: Path, memory_db: Path) -> str:
     {memory_db}
     ```
 
-    This profile is intentionally local-only. Slack, Telegram, API server, and other production platform tokens are not copied by this setup script.
+    This profile is intentionally local-only. Slack, Telegram, and other production platform tokens are not copied by this setup script.
+
+    The profile enables the Roscoe API server on `127.0.0.1:8765` with the test key `memory-test-local-key` for gateway-path dogfooding.
 
     Run CMS smoke:
 
@@ -265,6 +276,15 @@ def _readme(profile_home: Path, memory_db: Path) -> str:
       tests/tools/test_conversational_memory_proposal_tools.py \\
       tests/gateway/test_conversational_memory_context.py \\
       tests/gateway/test_conversational_memory_live_loop.py
+    ```
+
+    Run gateway in foreground:
+
+    ```bash
+    set -a
+    source {profile_home}/.env
+    set +a
+    HERMES_HOME={profile_home} python -m hermes_cli.main gateway run
     ```
     """)
 
