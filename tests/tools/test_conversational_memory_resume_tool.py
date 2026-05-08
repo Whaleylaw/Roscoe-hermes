@@ -58,6 +58,42 @@ def test_conversational_memory_resume_calls_configured_command_with_summary_id(
     assert result["turns"] == [{"role": "user", "content": "Smith PIP"}]
 
 
+def test_conversational_memory_resume_tolerates_model_filled_empty_optional_fields(
+    tmp_path,
+    monkeypatch,
+):
+    script = tmp_path / "resume_defaults.py"
+    script.write_text(
+        "import json, sys\n"
+        "request = json.loads(sys.stdin.read())\n"
+        "assert request == {'summary_id': 'summary_smith_pip'}\n"
+        "print(json.dumps({\n"
+        "  'ok': True,\n"
+        "  'turnCount': 1,\n"
+        "  'sourceSummaryIds': ['summary_smith_pip'],\n"
+        "  'contextBlock': '<memory-resume>Smith PIP</memory-resume>',\n"
+        "  'turns': []\n"
+        "}))\n"
+    )
+    monkeypatch.setenv(
+        "HERMES_CONVERSATIONAL_MEMORY_RESUME_COMMAND",
+        f"{sys.executable} {script}",
+    )
+
+    result = json.loads(conversational_memory_resume(
+        summary_id="summary_smith_pip",
+        trace_id="",
+        box_id="",
+        injection_packet={},
+        max_turn_ranges=1,
+        include_child_boxes=False,
+    ))
+
+    assert result["success"] is True
+    assert result["turn_count"] == 1
+    assert result["source_summary_ids"] == ["summary_smith_pip"]
+
+
 def test_conversational_memory_resume_calls_configured_command_with_trace_id(
     tmp_path,
     monkeypatch,

@@ -243,7 +243,7 @@ def conversational_memory_resume(
             "Provide exactly one of summary_id, trace_id, box_id, or injection_packet.",
             success=False,
         )
-    if not box_id and (max_turn_ranges is not None or include_child_boxes is not None):
+    if not box_id and include_child_boxes:
         return tool_error("Box resume options require box_id.", success=False)
 
     request: Dict[str, Any]
