@@ -45,7 +45,21 @@ python scripts/run_memory_test_sleep_review.py \
   --reviewed-at "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
 ```
 
-This wrapper intentionally refuses non-`memory-test` profile paths. It loads `/Users/aaronwhaley/.hermes/profiles/memory-test/.env`, runs sleep review, lists proposed memory-organization changes, and prints compact JSON for logs or scheduler output.
+This wrapper intentionally refuses non-`memory-test` profile paths. It loads `/Users/aaronwhaley/.hermes/profiles/memory-test/.env`, runs sleep review, lists proposed memory-organization changes, appends JSONL to `logs/memory-test-sleep-review.jsonl`, writes `logs/memory-test-sleep-review-status.json`, and prints compact JSON for logs or scheduler output.
+
+Check the last run:
+
+```bash
+python scripts/run_memory_test_sleep_review.py --status
+```
+
+Install the daily macOS launchd schedule for 2:30 AM:
+
+```bash
+python scripts/install_memory_test_sleep_review_schedule.py
+```
+
+The installer writes `~/Library/LaunchAgents/com.roscoe.memory-test-sleep-review.plist` and refuses non-`memory-test` profile paths.
 
 Run a foreground search check:
 

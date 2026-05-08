@@ -5,7 +5,11 @@ import sys
 
 import pytest
 
-from scripts.run_memory_test_sleep_review import run_memory_test_sleep_review
+from scripts.run_memory_test_sleep_review import (
+    read_sleep_review_status,
+    run_memory_test_sleep_review,
+    write_sleep_review_run_record,
+)
 
 
 def test_run_memory_test_sleep_review_uses_profile_env(tmp_path, monkeypatch):
@@ -73,14 +77,46 @@ def test_run_memory_test_sleep_review_uses_profile_env(tmp_path, monkeypatch):
     result = run_memory_test_sleep_review(
         profile_home=profile_home,
         reviewed_at="2026-05-08T06:00:00.000Z",
+        ran_at="2026-05-08T06:01:00.000Z",
     )
 
     assert result["success"] is True
+    assert result["ran_at"] == "2026-05-08T06:01:00.000Z"
     assert result["profile_home"] == str(profile_home)
     assert result["memory_db"] == str(memory_db)
     assert result["sleep_review"]["proposed_trace_ids"] == ["trace_smith_pip_provider_bill"]
     assert result["proposals"]["proposals"][0]["target_trace_ids"] == ["trace_smith_pip_provider_bill"]
     assert os.environ["HERMES_CONVERSATIONAL_MEMORY_DB"] == "/should/not/be/used.sqlite"
+
+
+def test_sleep_review_run_record_writes_jsonl_and_status(tmp_path):
+    profile_home = tmp_path / "memory-test"
+    profile_home.mkdir()
+    (profile_home / ".env").write_text("", encoding="utf-8")
+    result = {
+        "success": True,
+        "ran_at": "2026-05-08T06:01:00.000Z",
+        "profile_home": str(profile_home),
+        "proposals": {"count": 0},
+    }
+    log_file = profile_home / "logs" / "sleep.jsonl"
+    status_file = profile_home / "logs" / "sleep-status.json"
+
+    write_sleep_review_run_record(result, log_file=log_file, status_file=status_file)
+
+    assert json.loads(log_file.read_text(encoding="utf-8")) == result
+    assert json.loads(status_file.read_text(encoding="utf-8")) == result
+
+
+def test_read_sleep_review_status_reports_missing_status(tmp_path):
+    profile_home = tmp_path / "memory-test"
+    profile_home.mkdir()
+    (profile_home / ".env").write_text("", encoding="utf-8")
+
+    result = read_sleep_review_status(profile_home=profile_home)
+
+    assert result["success"] is False
+    assert result["error"] == "No sleep-review status has been written yet."
 
 
 def test_run_memory_test_sleep_review_refuses_non_test_profile(tmp_path):
@@ -132,6 +168,7 @@ def test_run_memory_test_sleep_review_cli_outputs_json(tmp_path):
             "scripts/run_memory_test_sleep_review.py",
             "--profile-home",
             str(profile_home),
+            "--no-log",
         ],
         text=True,
         capture_output=True,
