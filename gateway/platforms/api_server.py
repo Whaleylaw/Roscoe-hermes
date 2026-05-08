@@ -63,6 +63,12 @@ MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversation
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
+_CONVERSATIONAL_MEMORY_BOUNDARY_COMMANDS = {
+    "/new": "Started a new conversation. The previous topic has been saved to memory.",
+    "/clear": "Started a new conversation. The previous topic has been saved to memory.",
+    "/reset": "Reset acknowledged. The previous topic has been saved to memory.",
+    "/compress": "Compression acknowledged. The current topic has been saved to memory.",
+}
 
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
@@ -271,6 +277,16 @@ def _content_has_visible_payload(content: Any) -> bool:
                 if ptype in _IMAGE_PART_TYPES:
                     return True
     return False
+
+
+def _conversational_memory_boundary_response(content: Any) -> Optional[str]:
+    """Return a local API reply for memory boundary slash commands."""
+    try:
+        text = _normalize_chat_content(content)
+    except Exception:
+        text = str(content) if content is not None else ""
+    command = text.strip().lower().split(maxsplit=1)[0] if text.strip() else ""
+    return _CONVERSATIONAL_MEMORY_BOUNDARY_COMMANDS.get(command)
 
 
 def _multimodal_validation_error(exc: ValueError, *, param: str) -> "web.Response":
@@ -1355,12 +1371,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 history = self._load_unified_timeline_history()
             # else: history already set from request body above
 
-        system_prompt = self._prepend_conversational_memory_context_to_system_prompt(
-            system_prompt=system_prompt,
-            conversation_history=history,
-            user_message=user_message,
-            session_id=session_id,
-        )
+        memory_boundary_response = _conversational_memory_boundary_response(user_message)
+        if memory_boundary_response is None:
+            system_prompt = self._prepend_conversational_memory_context_to_system_prompt(
+                system_prompt=system_prompt,
+                conversation_history=history,
+                user_message=user_message,
+                session_id=session_id,
+            )
 
         history_count, history_chars = _conversation_stats(history)
         user_chars = len(_normalize_chat_content(user_message))
@@ -1390,6 +1408,34 @@ class APIServerAdapter(BasePlatformAdapter):
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
+
+        if memory_boundary_response is not None:
+            response_headers = {
+                "X-Hermes-Session-Id": session_id,
+            }
+            if gateway_session_key:
+                response_headers["X-Hermes-Session-Key"] = gateway_session_key
+            return web.json_response({
+                "id": completion_id,
+                "object": "chat.completion",
+                "created": created,
+                "model": model_name,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": memory_boundary_response,
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+            }, headers=response_headers)
 
         if stream:
             import queue as _q

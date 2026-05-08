@@ -91,3 +91,30 @@ curl -sS http://127.0.0.1:8765/v1/chat/completions \
 ```
 
 Expected behavior: the answer can use the Smith PIP deadline from standalone memory even though the user did not ask the agent to call `conversational_memory_search`.
+
+To verify `/new` compacts the active API topic without spending a model turn:
+
+```bash
+curl -sS http://127.0.0.1:8765/v1/chat/completions \
+  -H 'Authorization: Bearer memory-test-local-key' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Hermes-Session-Id: boundary-dogfood' \
+  -H 'X-Hermes-Session-Key: boundary-dogfood' \
+  -d '{"model":"memory-test","messages":[{"role":"user","content":"Let us discuss Alpha Boundary Case. The settlement ledger review deadline is July 9."}],"stream":false}'
+
+curl -sS http://127.0.0.1:8765/v1/chat/completions \
+  -H 'Authorization: Bearer memory-test-local-key' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Hermes-Session-Id: boundary-dogfood' \
+  -H 'X-Hermes-Session-Key: boundary-dogfood' \
+  -d '{"model":"memory-test","messages":[{"role":"user","content":"/new"}],"stream":false}'
+
+curl -sS http://127.0.0.1:8765/v1/chat/completions \
+  -H 'Authorization: Bearer memory-test-local-key' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Hermes-Session-Id: boundary-dogfood' \
+  -H 'X-Hermes-Session-Key: boundary-dogfood' \
+  -d '{"model":"memory-test","messages":[{"role":"user","content":"Can we pick back up on Alpha Boundary Case? Answer with the remembered settlement ledger review deadline if available."}],"stream":false}'
+```
+
+Expected behavior: `/new` returns a zero-token local acknowledgement, CMS stores a summary for the pre-`/new` exchange, and the follow-up can recall the July 9 deadline through passive memory injection.

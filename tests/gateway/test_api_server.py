@@ -29,6 +29,7 @@ from gateway.platforms.api_server import (
     ResponseStore,
     _IdempotencyCache,
     _CORS_HEADERS,
+    _conversational_memory_boundary_response,
     _derive_chat_session_id,
     check_api_server_requirements,
     cors_middleware,
@@ -283,6 +284,21 @@ class TestAdapterInit:
             "<memory-context>Smith PIP deadline is June 1.</memory-context>\n"
             "You are helpful."
         )
+
+    def test_conversational_memory_boundary_commands_are_local_replies(self):
+        assert _conversational_memory_boundary_response("/new") == (
+            "Started a new conversation. The previous topic has been saved to memory."
+        )
+        assert _conversational_memory_boundary_response("/clear now") == (
+            "Started a new conversation. The previous topic has been saved to memory."
+        )
+        assert _conversational_memory_boundary_response("/reset") == (
+            "Reset acknowledged. The previous topic has been saved to memory."
+        )
+        assert _conversational_memory_boundary_response("/compress") == (
+            "Compression acknowledged. The current topic has been saved to memory."
+        )
+        assert _conversational_memory_boundary_response("Can we resume Smith PIP?") is None
 
     def test_create_agent_forwards_config_reasoning_effort(self, monkeypatch):
         captured = {}
