@@ -56,12 +56,18 @@ python scripts/run_memory_test_sleep_review.py --status
 Run a guarded sleep-review pass for a non-test profile only after that profile has its own conversational-memory environment wired:
 
 ```bash
+python scripts/setup_profile_conversational_memory.py \
+  --profile <profile-name> \
+  --update-config
+
 python scripts/run_profile_sleep_review.py \
   --profile <profile-name> \
   --allow-profile <profile-name>
 ```
 
-This wrapper is manual-only. It refuses `memory-test`, requires an explicit `--allow-profile` match, requires the memory database to live under the selected profile home, and only lists proposed organization changes after sleep review. It does not approve proposals or schedule itself.
+The setup script appends a managed conversational-memory block to the profile `.env`, points the memory database at `<profile-home>/conversational-memory.sqlite`, and, with `--update-config`, enables the `memory` toolset for CLI/API-server use. It refuses `memory-test` and refuses unmanaged existing `HERMES_CONVERSATIONAL_MEMORY_*` keys unless explicitly forced.
+
+The guarded sleep-review wrapper is manual-only. It refuses `memory-test`, requires an explicit `--allow-profile` match, requires the memory database to live under the selected profile home, and only lists proposed organization changes after sleep review. It does not approve proposals or schedule itself.
 
 Check the last non-test profile run:
 
