@@ -16,6 +16,7 @@ DEFAULT_PROFILE_HOME = Path.home() / ".hermes" / "profiles" / "memory-test"
 DEFAULT_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WRAPPER_PATH = REPO_ROOT / "scripts" / "run_memory_test_sleep_review.py"
+DEFAULT_LAUNCHD_PATH = "/opt/homebrew/bin:/usr/local/bin:/opt/anaconda3/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 def build_launchd_plist(
@@ -44,6 +45,9 @@ def build_launchd_plist(
         "StandardOutPath": str(logs_dir / "memory-test-sleep-review.stdout.log"),
         "StandardErrorPath": str(logs_dir / "memory-test-sleep-review.stderr.log"),
         "WorkingDirectory": str(REPO_ROOT),
+        "EnvironmentVariables": {
+            "PATH": DEFAULT_LAUNCHD_PATH,
+        },
         "RunAtLoad": False,
     }
 

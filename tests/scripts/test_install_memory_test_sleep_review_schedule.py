@@ -30,6 +30,7 @@ def test_build_launchd_plist_points_at_memory_test_wrapper(tmp_path):
     ]
     assert plist["ProgramArguments"][3] == str(profile_home.resolve())
     assert plist["StartCalendarInterval"] == {"Hour": 3, "Minute": 15}
+    assert "/opt/homebrew/bin" in plist["EnvironmentVariables"]["PATH"]
     assert plist["StandardOutPath"].endswith("memory-test-sleep-review.stdout.log")
     assert plist["StandardErrorPath"].endswith("memory-test-sleep-review.stderr.log")
 
