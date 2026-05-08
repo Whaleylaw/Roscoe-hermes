@@ -18,9 +18,10 @@ logger = logging.getLogger(__name__)
 CONVERSATIONAL_MEMORY_RESUME_SCHEMA = {
     "name": "conversational_memory_resume",
     "description": (
-        "Expand a compacted conversational memory summary or injection packet into "
-        "verbatim source turns. Use when the user asks to resume, pick up where "
-        "we left off, show the original conversation, or dig into a recalled memory."
+        "Expand a compacted conversational memory summary, trace, box, or injection "
+        "packet into verbatim source turns. Use when the user asks to resume, pick "
+        "up where we left off, show the original conversation, or dig into a "
+        "recalled memory."
     ),
     "parameters": {
         "type": "object",
@@ -28,6 +29,23 @@ CONVERSATIONAL_MEMORY_RESUME_SCHEMA = {
             "summary_id": {
                 "type": "string",
                 "description": "Summary id to expand into verbatim source turns.",
+            },
+            "trace_id": {
+                "type": "string",
+                "description": "Trace id to expand into verbatim source turns.",
+            },
+            "box_id": {
+                "type": "string",
+                "description": "Box id to expand into verbatim source turns.",
+            },
+            "max_turn_ranges": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum number of turn ranges to include. Only valid with box_id.",
+            },
+            "include_child_boxes": {
+                "type": "boolean",
+                "description": "Whether to include child boxes when expanding a box_id.",
             },
             "injection_packet": {
                 "type": "object",
@@ -45,13 +63,20 @@ def check_conversational_memory_resume_requirements() -> bool:
 
 def conversational_memory_resume(
     summary_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    box_id: Optional[str] = None,
     injection_packet: Optional[Dict[str, Any]] = None,
+    max_turn_ranges: Optional[int] = None,
+    include_child_boxes: Optional[bool] = None,
 ) -> str:
-    if bool(summary_id) == bool(injection_packet):
+    source_count = sum(bool(value) for value in (summary_id, trace_id, box_id, injection_packet))
+    if source_count != 1:
         return tool_error(
-            "Provide exactly one of summary_id or injection_packet, not both.",
+            "Provide exactly one of summary_id, trace_id, box_id, or injection_packet.",
             success=False,
         )
+    if not box_id and (max_turn_ranges is not None or include_child_boxes is not None):
+        return tool_error("Box resume options require box_id.", success=False)
 
     command = os.environ.get("HERMES_CONVERSATIONAL_MEMORY_RESUME_COMMAND", "").strip()
     if not command:
@@ -63,6 +88,14 @@ def conversational_memory_resume(
     request: Dict[str, Any]
     if summary_id:
         request = {"summary_id": summary_id}
+    elif trace_id:
+        request = {"trace_id": trace_id}
+    elif box_id:
+        request = {"box_id": box_id}
+        if max_turn_ranges is not None:
+            request["max_turn_ranges"] = max_turn_ranges
+        if include_child_boxes is not None:
+            request["include_child_boxes"] = include_child_boxes
     else:
         request = {"injection_packet": injection_packet}
 
@@ -84,6 +117,8 @@ def conversational_memory_resume(
         "success": True,
         "turn_count": payload.get("turnCount"),
         "source_summary_ids": payload.get("sourceSummaryIds", []),
+        "source_trace_ids": payload.get("sourceTraceIds", []),
+        "source_box_ids": payload.get("sourceBoxIds", []),
         "source_turn_ranges": payload.get("sourceTurnRanges", []),
         "disclosure_text": payload.get("disclosureText"),
         "context_block": payload.get("contextBlock"),
@@ -119,7 +154,11 @@ registry.register(
     schema=CONVERSATIONAL_MEMORY_RESUME_SCHEMA,
     handler=lambda args, **_kw: conversational_memory_resume(
         summary_id=args.get("summary_id"),
+        trace_id=args.get("trace_id"),
+        box_id=args.get("box_id"),
         injection_packet=args.get("injection_packet"),
+        max_turn_ranges=args.get("max_turn_ranges"),
+        include_child_boxes=args.get("include_child_boxes"),
     ),
     check_fn=check_conversational_memory_resume_requirements,
     emoji="🧠",
