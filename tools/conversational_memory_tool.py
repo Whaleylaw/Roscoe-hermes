@@ -57,6 +57,43 @@ CONVERSATIONAL_MEMORY_RESUME_SCHEMA = {
 }
 
 
+CONVERSATIONAL_MEMORY_SEARCH_SCHEMA = {
+    "name": "conversational_memory_search",
+    "description": (
+        "Search standalone conversational memory for relevant compacted context. "
+        "Use when the user asks about an older topic, case, issue, or prior "
+        "conversation and you need recalled memory before deciding whether to resume."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Free-text memory search query.",
+            },
+            "profile_id": {
+                "type": "string",
+                "description": "Memory profile id. Defaults to default.",
+            },
+            "session_id": {
+                "type": "string",
+                "description": "Host session id for audit/provenance. Defaults to profile:default.",
+            },
+            "requested_at": {
+                "type": "string",
+                "description": "Optional ISO timestamp for the search request.",
+            },
+            "max_memory_tokens": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Approximate maximum selected memory tokens.",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+
 CONVERSATIONAL_MEMORY_SLEEP_REVIEW_SCHEMA = {
     "name": "conversational_memory_sleep_review",
     "description": (
@@ -173,6 +210,10 @@ def check_conversational_memory_resume_requirements() -> bool:
     return bool(os.environ.get("HERMES_CONVERSATIONAL_MEMORY_RESUME_COMMAND", "").strip())
 
 
+def check_conversational_memory_search_requirements() -> bool:
+    return bool(os.environ.get("HERMES_CONVERSATIONAL_MEMORY_INJECT_COMMAND", "").strip())
+
+
 def check_conversational_memory_sleep_review_requirements() -> bool:
     return bool(os.environ.get("HERMES_CONVERSATIONAL_MEMORY_SLEEP_COMMAND", "").strip())
 
@@ -246,6 +287,65 @@ def conversational_memory_resume(
             for turn in payload.get("turns", [])
             if isinstance(turn, dict)
         ],
+    })
+
+
+def conversational_memory_search(
+    query: str,
+    profile_id: str = "default",
+    session_id: str = "profile:default",
+    requested_at: Optional[str] = None,
+    max_memory_tokens: Optional[int] = None,
+) -> str:
+    if not query or not query.strip():
+        return tool_error("query is required.", success=False)
+
+    command = os.environ.get("HERMES_CONVERSATIONAL_MEMORY_INJECT_COMMAND", "").strip()
+    if not command:
+        return tool_error(
+            "HERMES_CONVERSATIONAL_MEMORY_INJECT_COMMAND is not configured.",
+            success=False,
+        )
+
+    request = _drop_none({
+        "profile_id": profile_id,
+        "session_id": session_id,
+        "query": query,
+        "requested_at": requested_at,
+        "max_memory_tokens": max_memory_tokens,
+    })
+
+    try:
+        payload = _run_json_command(command, request)
+    except Exception as exc:
+        logger.warning("Conversational memory search failed: %s", exc)
+        return tool_error(f"Conversational memory search failed: {exc}", success=False)
+
+    packet = payload.get("packet")
+    if not isinstance(packet, dict):
+        return json.dumps({
+            "success": True,
+            "found": False,
+            "packet": None,
+            "context_block": payload.get("contextBlock"),
+            "source_summary_ids": [],
+            "source_trace_ids": [],
+            "source_box_ids": [],
+            "source_turn_ranges": [],
+        })
+
+    return json.dumps({
+        "success": True,
+        "found": True,
+        "packet": packet,
+        "context_block": payload.get("contextBlock"),
+        "source_summary_ids": packet.get("sourceSummaryIds", []),
+        "source_trace_ids": packet.get("sourceTraceIds", []),
+        "source_box_ids": packet.get("sourceBoxIds", []),
+        "source_turn_ranges": packet.get("sourceTurnRanges", []),
+        "disclosure_text": packet.get("disclosureText"),
+        "relevance_reason": packet.get("relevanceReason"),
+        "confidence": packet.get("confidence"),
     })
 
 
@@ -434,6 +534,22 @@ registry.register(
         include_child_boxes=args.get("include_child_boxes"),
     ),
     check_fn=check_conversational_memory_resume_requirements,
+    emoji="🧠",
+)
+
+
+registry.register(
+    name="conversational_memory_search",
+    toolset="memory",
+    schema=CONVERSATIONAL_MEMORY_SEARCH_SCHEMA,
+    handler=lambda args, **_kw: conversational_memory_search(
+        query=args.get("query", ""),
+        profile_id=args.get("profile_id", "default"),
+        session_id=args.get("session_id", "profile:default"),
+        requested_at=args.get("requested_at"),
+        max_memory_tokens=args.get("max_memory_tokens"),
+    ),
+    check_fn=check_conversational_memory_search_requirements,
     emoji="🧠",
 )
 
