@@ -14,6 +14,7 @@ Tests cover:
 
 import asyncio
 import json
+import sys
 import time
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -245,6 +246,43 @@ class TestAdapterInit:
         config = PlatformConfig(enabled=True)
         adapter = APIServerAdapter(config)
         assert adapter._port == 8642
+
+    def test_conversational_memory_context_layers_into_system_prompt(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+    ):
+        bridge_script = tmp_path / "inject.py"
+        bridge_script.write_text(
+            "import json\n"
+            "request = json.loads(input())\n"
+            "assert request['profile_id'] == 'default'\n"
+            "assert request['session_id'] == 'api-memory-session'\n"
+            "assert request['query'] == 'Can we pick back up on Smith PIP timing?'\n"
+            "print(json.dumps({\n"
+            "  'ok': True,\n"
+            "  'packet': {'id': 'inject_api_1'},\n"
+            "  'contextBlock': '<memory-context>Smith PIP deadline is June 1.</memory-context>'\n"
+            "}))\n"
+        )
+        monkeypatch.setenv("HERMES_CONVERSATIONAL_MEMORY_INJECT_ENABLED", "1")
+        monkeypatch.setenv(
+            "HERMES_CONVERSATIONAL_MEMORY_INJECT_COMMAND",
+            f"{sys.executable} {bridge_script}",
+        )
+
+        prompt = auth_adapter._prepend_conversational_memory_context_to_system_prompt(
+            system_prompt="You are helpful.",
+            conversation_history=[],
+            user_message="Can we pick back up on Smith PIP timing?",
+            session_id="api-memory-session",
+        )
+
+        assert prompt == (
+            "<memory-context>Smith PIP deadline is June 1.</memory-context>\n"
+            "You are helpful."
+        )
 
     def test_create_agent_forwards_config_reasoning_effort(self, monkeypatch):
         captured = {}

@@ -78,3 +78,16 @@ curl -sS http://127.0.0.1:8765/v1/chat/completions \
   -H 'X-Hermes-Use-Unified-Timeline: true' \
   -d '{"model":"memory-test","messages":[{"role":"user","content":"Use conversational_memory_search to search for Smith PIP demand timing. Answer with the found status and source summary id."}],"stream":false}'
 ```
+
+Then exercise passive memory injection without explicitly asking for a tool:
+
+```bash
+curl -sS http://127.0.0.1:8765/v1/chat/completions \
+  -H 'Authorization: Bearer memory-test-local-key' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Hermes-Session-Id: passive-memory-dogfood' \
+  -H 'X-Hermes-Session-Key: passive-memory-dogfood' \
+  -d '{"model":"memory-test","messages":[{"role":"user","content":"Can we pick back up on Smith PIP demand timing? Answer with the remembered deadline if one is available."}],"stream":false}'
+```
+
+Expected behavior: the answer can use the Smith PIP deadline from standalone memory even though the user did not ask the agent to call `conversational_memory_search`.

@@ -44,6 +44,7 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.conversational_memory_context import maybe_prepend_conversational_memory_context
 from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
@@ -944,6 +945,45 @@ class APIServerAdapter(BasePlatformAdapter):
                 "unified_timeline record_outbound (error path) failed: %s", e,
             )
 
+    def _prepend_conversational_memory_context_to_system_prompt(
+        self,
+        *,
+        system_prompt: Optional[str],
+        conversation_history: List[Dict[str, Any]],
+        user_message: Any,
+        session_id: str,
+    ) -> Optional[str]:
+        """Layer passive standalone memory recall into the API agent prompt."""
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+
+            profile_id = get_active_profile_name()
+            messages = list(conversation_history or [])
+            messages.append({
+                "role": "user",
+                "content": _normalize_chat_content(user_message),
+            })
+            injected = maybe_prepend_conversational_memory_context(
+                messages=messages,
+                profile_id=profile_id,
+                session_id=session_id,
+            )
+        except Exception as e:
+            logger.warning("Conversational memory context injection failed for API server: %s", e)
+            return system_prompt
+
+        if not injected or injected == messages:
+            return system_prompt
+        first = injected[0]
+        if first.get("role") != "system":
+            return system_prompt
+        context_block = first.get("content")
+        if not isinstance(context_block, str) or not context_block.strip():
+            return system_prompt
+        if system_prompt and system_prompt.strip():
+            return f"{context_block.strip()}\n{system_prompt.strip()}"
+        return context_block.strip()
+
     # ------------------------------------------------------------------
     # Agent creation helper
     # ------------------------------------------------------------------
@@ -1314,6 +1354,13 @@ class APIServerAdapter(BasePlatformAdapter):
                 # not inherit unrelated Telegram/cron/Slack turns.
                 history = self._load_unified_timeline_history()
             # else: history already set from request body above
+
+        system_prompt = self._prepend_conversational_memory_context_to_system_prompt(
+            system_prompt=system_prompt,
+            conversation_history=history,
+            user_message=user_message,
+            session_id=session_id,
+        )
 
         history_count, history_chars = _conversation_stats(history)
         user_chars = len(_normalize_chat_content(user_message))
