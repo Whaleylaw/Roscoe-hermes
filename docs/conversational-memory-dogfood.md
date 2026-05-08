@@ -53,6 +53,25 @@ Check the last run:
 python scripts/run_memory_test_sleep_review.py --status
 ```
 
+Run a guarded sleep-review pass for a non-test profile only after that profile has its own conversational-memory environment wired:
+
+```bash
+python scripts/run_profile_sleep_review.py \
+  --profile <profile-name> \
+  --allow-profile <profile-name>
+```
+
+This wrapper is manual-only. It refuses `memory-test`, requires an explicit `--allow-profile` match, requires the memory database to live under the selected profile home, and only lists proposed organization changes after sleep review. It does not approve proposals or schedule itself.
+
+Check the last non-test profile run:
+
+```bash
+python scripts/run_profile_sleep_review.py \
+  --profile <profile-name> \
+  --allow-profile <profile-name> \
+  --status
+```
+
 Install the daily macOS launchd schedule for 2:30 AM:
 
 ```bash
