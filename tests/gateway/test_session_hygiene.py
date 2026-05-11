@@ -240,6 +240,31 @@ class TestSessionHygieneWarnThreshold:
         assert post_compress_tokens < warn_threshold
 
 
+def test_hygiene_memory_boundary_uses_profile_timeline_next_sequence(monkeypatch):
+    import gateway.run as gateway_run
+
+    class FakeSessionDB:
+        def timeline_next_seq(self, profile_id):
+            assert profile_id == "coder"
+            return 123
+
+    emit_boundary = MagicMock(return_value=True)
+    monkeypatch.setattr("hermes_cli.profiles.get_active_profile_name", lambda: "coder")
+    monkeypatch.setattr(
+        gateway_run,
+        "emit_conversational_memory_compression_boundary",
+        emit_boundary,
+    )
+
+    assert gateway_run._emit_hygiene_memory_boundary(FakeSessionDB()) is True
+
+    emit_boundary.assert_called_once_with(
+        profile_id="coder",
+        seq=123,
+        reason="gateway_hygiene",
+    )
+
+
 
 
 
@@ -403,6 +428,13 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
         "agent.model_metadata.get_model_context_length",
         lambda *_args, **_kwargs: 100,
     )
+    emit_boundary = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        gateway_run,
+        "emit_conversational_memory_compression_boundary",
+        emit_boundary,
+        raising=False,
+    )
     monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "795544298")
 
     event = MessageEvent(
@@ -424,6 +456,8 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
     # happens silently with server-side logging only.
     assert len(adapter.sent) == 0
     assert FakeCompressAgent.last_instance is not None
+    emit_boundary.assert_called_once()
+    assert emit_boundary.call_args.kwargs["reason"] == "gateway_hygiene"
     FakeCompressAgent.last_instance.shutdown_memory_provider.assert_called_once()
     FakeCompressAgent.last_instance.close.assert_called_once()
 

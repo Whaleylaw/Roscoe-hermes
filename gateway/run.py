@@ -40,6 +40,7 @@ from typing import Dict, Optional, Any, List, Union
 # preserving the established test-patch surface.
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.i18n import t
+from gateway.conversational_memory import emit_conversational_memory_compression_boundary
 from hermes_cli.config import cfg_get
 
 # --- Agent cache tuning ---------------------------------------------------
@@ -51,6 +52,29 @@ _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
+
+
+def _emit_hygiene_memory_boundary(session_db: Any = None) -> bool:
+    """Tell standalone conversational memory to compact before hygiene shrink."""
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        profile_id = get_active_profile_name()
+        seq = (
+            session_db.timeline_next_seq(profile_id)
+            if session_db is not None
+            else None
+        )
+        return emit_conversational_memory_compression_boundary(
+            profile_id=profile_id,
+            seq=seq,
+            reason="gateway_hygiene",
+        )
+    except Exception as e:
+        logger.warning(
+            "Session hygiene conversational-memory boundary failed: %s", e
+        )
+        return False
 
 
 def _telegramize_command_mentions(text: str, platform: Any) -> str:
@@ -6403,6 +6427,7 @@ class GatewayRunner:
                         f"{_hyg_context_length:,}",
                         f"{_compress_token_threshold:,}",
                     )
+                    _emit_hygiene_memory_boundary(self._session_db)
 
                     _hyg_meta = {"thread_id": source.thread_id} if source.thread_id else None
 

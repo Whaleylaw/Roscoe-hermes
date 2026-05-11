@@ -69,6 +69,8 @@ The setup script appends a managed conversational-memory block to the profile `.
 
 The guarded sleep-review wrapper is manual-only. It refuses `memory-test`, requires an explicit `--allow-profile` match, requires the memory database to live under the selected profile home, and only lists proposed organization changes after sleep review. It does not approve proposals or schedule itself.
 
+When Roscoe's native context compression fires automatically, it now emits a synthetic `/compress` boundary to the standalone memory system first. CMS uses that boundary to compact the uncompacted profile timeline into source-linked summaries before Roscoe shrinks the live prompt. Native compression remains the overflow-safety mechanism for the model context; CMS owns the durable memory summary.
+
 Check the last non-test profile run:
 
 ```bash

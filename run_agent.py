@@ -9414,6 +9414,17 @@ class AIAgent:
             f"{approx_tokens:,}" if approx_tokens else "unknown", self.model,
             focus_topic,
         )
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            from gateway.conversational_memory import emit_conversational_memory_compression_boundary
+
+            emit_conversational_memory_compression_boundary(
+                profile_id=get_active_profile_name(),
+                reason="agent_context_compression",
+            )
+        except Exception as exc:
+            logger.debug("conversational-memory compression boundary skipped: %s", exc)
+
         # Pre-compression memory handling is now owned by the background review
         # loop (every 10 user turns on CLI and gateway) which writes memories
         # asynchronously without blocking the live turn or invalidating prompt

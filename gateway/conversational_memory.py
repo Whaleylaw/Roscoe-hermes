@@ -7,6 +7,7 @@ import logging
 import os
 import shlex
 import subprocess
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -71,6 +72,46 @@ def emit_unified_timeline_row(
         )
     except Exception as exc:
         logger.warning("Conversational memory bridge emit failed: %s", exc)
+
+
+def emit_conversational_memory_compression_boundary(
+    *,
+    profile_id: str,
+    seq: Optional[int] = None,
+    ts: Optional[float] = None,
+    reason: str = "native_compression",
+) -> bool:
+    """Emit a synthetic /compress control row so CMS compacts before native shrink.
+
+    This does not write to Roscoe's unified timeline. It only hands a control
+    signal to the external memory bridge using a sequence greater than the
+    already-ingested rows, allowing CMS to summarize the uncompacted tail while
+    Roscoe's native compressor remains a prompt-size safety fallback.
+    """
+    if not conversational_memory_enabled():
+        return False
+
+    command = os.environ.get("HERMES_CONVERSATIONAL_MEMORY_COMMAND", "").strip()
+    if not command:
+        logger.debug("Conversational memory boundary requested without a command")
+        return False
+
+    boundary_seq = seq if seq is not None else int(time.time() * 1000)
+    boundary_ts = ts if ts is not None else time.time()
+    message_id = f"memory-boundary:{reason}:{boundary_seq}"
+    emit_unified_timeline_row(
+        profile_id=profile_id,
+        seq=boundary_seq,
+        ts=boundary_ts,
+        direction="system",
+        platform="gateway",
+        source_chat_id=None,
+        source_thread_id=None,
+        author="native-compression",
+        content="/compress",
+        message_id=message_id,
+    )
+    return True
 
 
 def build_hermes_timeline_row(
