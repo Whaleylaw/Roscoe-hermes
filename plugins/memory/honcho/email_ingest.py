@@ -140,7 +140,15 @@ def _obj_dict(obj: Any) -> dict[str, Any]:
 def _iter_session_messages(session: Any, page_size: int = 100) -> Iterable[Any]:
     page_no = 1
     while True:
-        page = session.messages(page=page_no, size=page_size)
+        try:
+            page = session.messages(page=page_no, size=page_size)
+        except Exception as exc:
+            # Newer Honcho SDKs removed page/size kwargs and expose a single
+            # SyncPage through messages(filters=...). Fall back to the current
+            # signature while preserving compatibility with the older paged API.
+            if page_no != 1 or "Unexpected keyword argument" not in str(exc):
+                raise
+            page = session.messages()
         items = _page_items(page)
         if not items:
             break

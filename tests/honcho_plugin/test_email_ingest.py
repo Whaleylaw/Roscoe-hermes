@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pytest
 
 from plugins.memory.honcho.email_ingest import (
     EmailMessage,
     HonchoEmailIngestor,
+    _iter_session_messages,
     case_workspace_id,
     normalize_email_date,
     normalize_email_peer_id,
@@ -166,3 +168,59 @@ def test_ingested_email_content_is_truncated_to_honcho_limit_with_metadata_flag(
     assert len(batch[0]["content"]) <= 25000
     assert batch[0]["metadata"]["content_truncated"] is True
     assert batch[0]["metadata"]["original_content_length"] == 26050
+
+
+class LegacyPagedSession:
+    def __init__(self):
+        self.calls = []
+
+    def messages(self, *, page, size):
+        self.calls.append((page, size))
+        if page == 1:
+            return SimpleNamespace(items=["first"], pages=2)
+        if page == 2:
+            return SimpleNamespace(items=["second"], pages=2)
+        return SimpleNamespace(items=[], pages=2)
+
+
+class CurrentSdkSession:
+    def __init__(self):
+        self.calls = 0
+
+    def messages(self, *args, **kwargs):
+        self.calls += 1
+        if kwargs:
+            raise TypeError("Unexpected keyword argument 'page'")
+        return SimpleNamespace(items=["only"], pages=1)
+
+
+class BrokenSecondPageSession:
+    def __init__(self):
+        self.calls = []
+
+    def messages(self, *, page, size):
+        self.calls.append((page, size))
+        if page == 1:
+            return SimpleNamespace(items=["first"], pages=2)
+        raise TypeError("Unexpected keyword argument 'page'")
+
+
+def test_iter_session_messages_supports_legacy_paged_honcho_sdk():
+    session = LegacyPagedSession()
+
+    assert list(_iter_session_messages(session, page_size=50)) == ["first", "second"]
+    assert session.calls == [(1, 50), (2, 50)]
+
+
+def test_iter_session_messages_falls_back_for_current_honcho_sdk_signature():
+    session = CurrentSdkSession()
+
+    assert list(_iter_session_messages(session, page_size=50)) == ["only"]
+    assert session.calls == 2
+
+
+def test_iter_session_messages_does_not_fallback_after_first_page():
+    session = BrokenSecondPageSession()
+
+    with pytest.raises(TypeError, match="Unexpected keyword argument"):
+        list(_iter_session_messages(session, page_size=50))
