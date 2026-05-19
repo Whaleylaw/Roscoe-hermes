@@ -2932,6 +2932,13 @@ class HermesCLI:
         self._background_tasks: Dict[str, threading.Thread] = {}
         self._background_task_counter = 0
 
+        # Temporary peer-team inbound delivery for interactive CLI sessions.
+        # This is intentionally opt-in and bounded by /peer-watch start|stop,
+        # not an always-on A2A daemon.
+        self._peer_watch_thread: Optional[threading.Thread] = None
+        self._peer_watch_stop: Optional[threading.Event] = None
+        self._peer_watch_config: Dict[str, Any] = {}
+
     def _invalidate(self, min_interval: float = 0.25) -> None:
         """Throttled UI repaint — prevents terminal blinking on slow/SSH connections."""
         if getattr(self, "_resize_recovery_pending", False):
@@ -8099,6 +8106,8 @@ class HermesCLI:
                 # No active run — treat as a normal next-turn message.
                 self._pending_input.put(payload)
                 _cprint(f"  No agent running; queued as next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
+        elif canonical == "peer-watch":
+            self._handle_peer_watch_command(cmd_original)
         elif canonical == "goal":
             self._handle_goal_command(cmd_original)
         elif canonical == "subgoal":
@@ -8245,6 +8254,190 @@ class HermesCLI:
         
         return True
     
+    def _handle_peer_watch_command(self, cmd: str):
+        """Handle /peer-watch start|stop|status for live peer inbox delivery."""
+        import shlex
+
+        parts = shlex.split(cmd)
+        action = parts[1].lower() if len(parts) > 1 else "status"
+        args = parts[2:] if len(parts) > 2 else []
+
+        def _flag(name: str, default: str = "") -> str:
+            prefix = f"--{name}="
+            for idx, item in enumerate(args):
+                if item == f"--{name}" and idx + 1 < len(args):
+                    return args[idx + 1]
+                if item.startswith(prefix):
+                    return item[len(prefix):]
+            return default
+
+        def _status_line() -> str:
+            running = bool(self._peer_watch_thread and self._peer_watch_thread.is_alive())
+            cfg = self._peer_watch_config or {}
+            if not running:
+                return "peer-watch stopped"
+            return (
+                f"peer-watch running: agent={cfg.get('agent_id', '')} "
+                f"project={cfg.get('project', '') or '(any)'} "
+                f"team={cfg.get('team_id', '') or '(none)'} "
+                f"poll={cfg.get('poll_seconds', '')}s"
+            )
+
+        if action in {"status", ""}:
+            _cprint(f"  {_status_line()}")
+            return
+        if action == "stop":
+            self._stop_peer_watch()
+            _cprint("  ✓ peer-watch stopped")
+            return
+        if action != "start":
+            _cprint("  Usage: /peer-watch [start|stop|status] [--agent id] [--project name] [--team id] [--poll seconds]")
+            return
+
+        agent_id = _flag("agent", os.environ.get("HERMES_PEER_AGENT_ID", "") or self.session_id).strip()
+        name = _flag("name", agent_id).strip() or agent_id
+        project = _flag("project", Path(os.getcwd()).name).strip()
+        team_id = _flag("team", "").strip()
+        role = _flag("role", "interactive Hermes peer").strip()
+        try:
+            poll_seconds = max(0.2, min(float(_flag("poll", "2.0")), 30.0))
+        except ValueError:
+            poll_seconds = 2.0
+        try:
+            ttl_seconds = max(60, int(_flag("ttl", str(6 * 60 * 60))))
+        except ValueError:
+            ttl_seconds = 6 * 60 * 60
+
+        self._start_peer_watch(
+            agent_id=agent_id,
+            name=name,
+            project=project,
+            team_id=team_id,
+            role=role,
+            poll_seconds=poll_seconds,
+            ttl_seconds=ttl_seconds,
+        )
+        _cprint(f"  ✓ {_status_line()}")
+
+    def _start_peer_watch(
+        self,
+        *,
+        agent_id: str,
+        name: str,
+        project: str,
+        team_id: str = "",
+        role: str = "interactive Hermes peer",
+        poll_seconds: float = 2.0,
+        ttl_seconds: int = 6 * 60 * 60,
+    ) -> None:
+        """Start a bounded background watcher that feeds peer messages into this open CLI session."""
+        self._stop_peer_watch(quiet=True)
+        stop_event = threading.Event()
+        self._peer_watch_stop = stop_event
+        self._peer_watch_config = {
+            "agent_id": agent_id,
+            "name": name,
+            "project": project,
+            "team_id": team_id,
+            "poll_seconds": poll_seconds,
+            "ttl_seconds": ttl_seconds,
+        }
+
+        def watch_loop() -> None:
+            try:
+                from peer_comms.store import PeerCommsStore
+                store = PeerCommsStore()
+            except Exception as exc:
+                logger.warning("peer-watch failed to initialize store: %s", exc)
+                return
+            last_refresh = 0.0
+            while not stop_event.is_set() and not getattr(self, "_should_exit", False):
+                try:
+                    now = time.time()
+                    if now - last_refresh > min(300.0, max(30.0, ttl_seconds / 3)):
+                        metadata = {"interactive_peer_watch": True}
+                        if team_id:
+                            metadata["team_id"] = team_id
+                        store.register_agent(
+                            name=name,
+                            agent_id=agent_id,
+                            role=role,
+                            project=project,
+                            cwd=os.getcwd(),
+                            session_id=self.session_id,
+                            model=self.model or "",
+                            metadata=metadata,
+                            ttl_seconds=ttl_seconds,
+                        )
+                        last_refresh = now
+                    messages = store.list_inbox(agent_id=agent_id, project=project, status="queued", limit=1)
+                    if messages:
+                        claimed = store.claim_message(msg_id=messages[0]["msg_id"], agent_id=agent_id)
+                        self._pending_input.put({"_hermes_peer_message": claimed})
+                except Exception as exc:
+                    logger.debug("peer-watch poll failed: %s", exc)
+                stop_event.wait(poll_seconds)
+
+        thread = threading.Thread(target=watch_loop, name=f"peer-watch-{agent_id}", daemon=True)
+        self._peer_watch_thread = thread
+        thread.start()
+
+    def _stop_peer_watch(self, quiet: bool = False) -> None:
+        stop_event = getattr(self, "_peer_watch_stop", None)
+        if stop_event is not None:
+            stop_event.set()
+        thread = getattr(self, "_peer_watch_thread", None)
+        if thread and thread.is_alive():
+            thread.join(timeout=2.0)
+        cfg = getattr(self, "_peer_watch_config", {}) or {}
+        if cfg.get("agent_id"):
+            try:
+                from peer_comms.store import PeerCommsStore
+                PeerCommsStore().mark_offline(cfg["agent_id"])
+            except Exception:
+                if not quiet:
+                    logger.debug("peer-watch offline mark failed", exc_info=True)
+        self._peer_watch_thread = None
+        self._peer_watch_stop = None
+        self._peer_watch_config = {}
+
+    @staticmethod
+    def _format_peer_message_for_turn(message: Dict[str, Any]) -> str:
+        subject = (message.get("subject") or "Peer task").strip() or "Peer task"
+        sender = message.get("sender_id", "unknown")
+        msg_id = message.get("msg_id", "")
+        project = message.get("project", "")
+        prompt = message.get("prompt", "")
+        return (
+            f"[Peer message received]\n"
+            f"Message ID: {msg_id}\n"
+            f"From: {sender}\n"
+            f"Project: {project}\n"
+            f"Subject: {subject}\n\n"
+            f"Task from peer agent:\n{prompt}\n\n"
+            "Handle this as an inbound peer-team task. Your final response will be sent back "
+            "to the peer mailbox automatically; do not ask the user to relay it."
+        )
+
+    def _reply_to_peer_message(self, message: Dict[str, Any], response: Optional[str]) -> None:
+        msg_id = message.get("msg_id", "")
+        agent_id = message.get("target_id", "")
+        if not msg_id or not agent_id:
+            return
+        try:
+            from peer_comms.store import PeerCommsStore
+            if response:
+                PeerCommsStore().reply_message(msg_id=msg_id, agent_id=agent_id, response=response, status="completed")
+            else:
+                PeerCommsStore().reply_message(
+                    msg_id=msg_id,
+                    agent_id=agent_id,
+                    response="Peer task completed without a final response.",
+                    status="failed",
+                )
+        except Exception as exc:
+            logger.warning("Failed to reply to peer message %s: %s", msg_id, exc)
+
     def _handle_background_command(self, cmd: str):
         """Handle /background <prompt> — run a prompt in a separate background session.
 
@@ -13759,9 +13952,13 @@ class HermesCLI:
                     # post-resize transient suppression should end here.
                     self._status_bar_suppressed_after_resize = False
 
-                    # Unpack image payload: (text, [Path, ...]) or plain str
+                    # Unpack synthetic peer payloads and image payloads.
+                    peer_message = None
                     submit_images = []
-                    if isinstance(user_input, tuple):
+                    if isinstance(user_input, dict) and "_hermes_peer_message" in user_input:
+                        peer_message = user_input.get("_hermes_peer_message") or {}
+                        user_input = self._format_peer_message_for_turn(peer_message)
+                    elif isinstance(user_input, tuple):
                         user_input, submit_images = user_input
 
                     if isinstance(user_input, str):
@@ -13814,7 +14011,9 @@ class HermesCLI:
                     app.invalidate()  # Refresh status line
 
                     try:
-                        self.chat(user_input, images=submit_images or None)
+                        response = self.chat(user_input, images=submit_images or None)
+                        if peer_message:
+                            self._reply_to_peer_message(peer_message, response)
                     finally:
                         self._agent_running = False
                         self._spinner_text = ""
@@ -14076,6 +14275,10 @@ class HermesCLI:
                 raise
         finally:
             self._should_exit = True
+            try:
+                self._stop_peer_watch(quiet=True)
+            except Exception:
+                pass
             # Interrupt the agent immediately so its daemon thread stops making
             # API calls and exits promptly (agent_thread is daemon, so the
             # process will exit once the main thread finishes, but interrupting

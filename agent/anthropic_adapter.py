@@ -93,9 +93,9 @@ _FAST_MODE_SUPPORTED_SUBSTRINGS = ("opus-4-6", "opus-4.6")
 # starves thinking-enabled models (thinking tokens count toward the limit).
 _ANTHROPIC_OUTPUT_LIMITS = {
     # Claude 4.7
-    "claude-opus-4-7":   128_000,
+    "claude-opus-4-7":    32_000,
     # Claude 4.6
-    "claude-opus-4-6":   128_000,
+    "claude-opus-4-6":    32_000,
     "claude-sonnet-4-6":  64_000,
     # Claude 4.5
     "claude-opus-4-5":    64_000,

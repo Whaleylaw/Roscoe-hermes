@@ -144,6 +144,17 @@ TOOLSETS = {
         "tools": ["terminal", "process"],
         "includes": []
     },
+
+    "peer_comms": {
+        "description": "Local peer-to-peer agent communication tools, including temporary team sessions",
+        "tools": [
+            "peer_team_start", "peer_team_status", "peer_team_launch", "peer_team_stop",
+            "peer_runner_start", "peer_runner_status", "peer_runner_stop",
+            "peer_register", "peer_list", "peer_send", "peer_inbox", "peer_claim",
+            "peer_reply", "peer_get", "peer_await", "peer_offline",
+        ],
+        "includes": []
+    },
     
     "moa": {
         "description": "Advanced reasoning and problem-solving tools",
