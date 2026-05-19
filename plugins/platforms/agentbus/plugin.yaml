@@ -1,0 +1,18 @@
+name: agentbus-platform
+label: Hermes AgentBus
+kind: platform
+version: 0.1.0
+description: >
+  Local Hermes-to-Hermes gateway transport. AgentBus lets profile gateways
+  exchange normal gateway MessageEvent traffic without using external chat
+  platforms or peer_comms mailbox tools.
+author: Nous Research
+optional_env:
+  - name: AGENTBUS_ENABLED
+    description: "Enable AgentBus platform from environment (1/true/yes)"
+    prompt: "Enable AgentBus? (true/false)"
+    password: false
+  - name: AGENTBUS_PROFILE
+    description: "Profile name announced on AgentBus (defaults to HERMES_HOME basename)"
+    prompt: "AgentBus profile name"
+    password: false

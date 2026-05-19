@@ -341,6 +341,14 @@ def _handle_send(args):
 
 def _parse_target_ref(platform_name: str, target_ref: str):
     """Parse a tool target into chat_id/thread_id and whether it is explicit."""
+    if platform_name == "agentbus":
+        # AgentBus targets are profile names (e.g. agentbus:paralegal), not
+        # numeric chat IDs or channel-directory entries. Treat any non-empty
+        # profile reference as explicit so send_message can route directly to
+        # the live AgentBus adapter/standalone plugin path.
+        target = (target_ref or "").strip()
+        if target:
+            return target, None, True
     if platform_name == "telegram":
         match = _TELEGRAM_TOPIC_TARGET_RE.fullmatch(target_ref)
         if match:
