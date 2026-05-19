@@ -1,16 +1,12 @@
 """Tests for gateway session management."""
 
+import builtins
 import json
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from gateway.config import (
-    Platform,
-    HomeChannel,
-    GatewayConfig,
-    PlatformConfig,
-    SessionFunnelConfig,
-)
+from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
+from gateway.platforms.base import MessageEvent
 from gateway.session import (
     SessionSource,
     SessionStore,
@@ -18,7 +14,6 @@ from gateway.session import (
     build_session_context_prompt,
     build_session_key,
     canonical_whatsapp_identifier,
-    resolve_session_key,
 )
 
 # Legacy name preserved for these tests; product renamed the function to
@@ -437,13 +432,81 @@ class TestBuildSessionContextPrompt:
         assert "Multi-user thread" not in prompt
 
 
+class TestSenderPrefixWithBackfill:
+    """Regression: sender prefix must not wrap the backfill context block.
+
+    Tests exercise the real GatewayRunner._prepare_inbound_message_text()
+    method to ensure the [sender_name] prefix applies only to the trigger
+    message, not the channel_context backfill block.
+    """
+
+    @pytest.fixture()
+    def runner(self):
+        from gateway.run import GatewayRunner
+
+        r = GatewayRunner.__new__(GatewayRunner)
+        r.config = GatewayConfig(group_sessions_per_user=False)
+        r.adapters = {}
+        r._model = "test-model"
+        r._base_url = ""
+        r._has_setup_skill = lambda: False
+        return r
+
+    @pytest.fixture()
+    def source(self):
+        return SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="c1",
+            chat_type="group",
+            user_name="Alice",
+        )
+
+    @pytest.mark.asyncio
+    async def test_plain_message_gets_prefix(self, runner, source):
+        """Normal message without backfill gets [sender] prefix."""
+        event = MessageEvent(text="hello world", source=source)
+        result = await runner._prepare_inbound_message_text(
+            event=event, source=source, history=[],
+        )
+        assert result == "[Alice] hello world"
+
+    @pytest.mark.asyncio
+    async def test_backfill_prefix_only_on_trigger(self, runner, source):
+        """Backfill context must NOT get the sender prefix."""
+        event = MessageEvent(
+            text="hello world",
+            source=source,
+            channel_context="[Recent channel messages]\n[Bob] some context",
+        )
+        result = await runner._prepare_inbound_message_text(
+            event=event, source=source, history=[],
+        )
+        assert result.startswith("[Recent channel messages]")
+        assert "[Alice] [Recent channel messages]" not in result
+        assert "[New message]\n[Alice] hello world" in result
+
+    @pytest.mark.asyncio
+    async def test_backfill_preserves_context_block(self, runner, source):
+        """The backfill block should pass through unchanged — no double-prefixing."""
+        context = "[Recent channel messages]\n[Bob] first\n[Charlie [bot]] second"
+        event = MessageEvent(
+            text="hey everyone", source=source, channel_context=context,
+        )
+        result = await runner._prepare_inbound_message_text(
+            event=event, source=source, history=[],
+        )
+        assert result.startswith(context)
+        assert "[Alice] hey everyone" in result
+        assert "[Alice] [Bob]" not in result
+        assert "[Alice] [Charlie" not in result
+        assert "[Alice] [Recent" not in result
+
+
 class TestSessionStoreRewriteTranscript:
     """Regression: /retry and /undo must persist truncated history to disk."""
 
     @pytest.fixture()
     def store(self, tmp_path):
-        # These tests call ``load_transcript`` directly — the
-        # per-session path — so unified_timeline.enabled is irrelevant.
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)
@@ -489,8 +552,6 @@ class TestLoadTranscriptCorruptLines:
 
     @pytest.fixture()
     def store(self, tmp_path):
-        # Direct ``load_transcript`` call — per-session JSONL path —
-        # the unified timeline flag is irrelevant for these tests.
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)
@@ -544,9 +605,6 @@ class TestLoadTranscriptPreferLongerSource:
         """SessionStore with both SQLite and JSONL active."""
         from hermes_state import SessionDB
 
-        # These tests call ``load_transcript`` directly to exercise the
-        # prefer-longer-source logic between SQLite and JSONL; that code
-        # path is independent of the unified timeline flag.
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)
@@ -631,6 +689,32 @@ class TestLoadTranscriptPreferLongerSource:
         # Should be the SQLite version (equal count → prefers SQLite)
         assert result[0]["content"] == "db-q"
 
+    def test_unreadable_jsonl_returns_sqlite(self, store_with_db, monkeypatch):
+        """Unreadable legacy JSONL must not hide valid SQLite history."""
+        sid = "unreadable_jsonl"
+        store_with_db._db.create_session(session_id=sid, source="gateway", model="m")
+        store_with_db._db.append_message(session_id=sid, role="user", content="db-q")
+        store_with_db._db.append_message(session_id=sid, role="assistant", content="db-a")
+
+        transcript_path = store_with_db.get_transcript_path(sid)
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        transcript_path.write_text('{"role": "user", "content": "jsonl-q"}\n', encoding="utf-8")
+
+        real_open = builtins.open
+
+        def raise_for_transcript(path, *args, **kwargs):
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if Path(path) == transcript_path and "r" in mode:
+                raise OSError("simulated unreadable transcript")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", raise_for_transcript)
+
+        result = store_with_db.load_transcript(sid)
+        assert len(result) == 2
+        assert result[0]["content"] == "db-q"
+        assert result[1]["content"] == "db-a"
+
 
 class TestSessionStoreSwitchSession:
     """Regression coverage for gateway /resume session switching semantics."""
@@ -674,21 +758,6 @@ class TestSessionStoreSwitchSession:
 class TestWhatsAppSessionKeyConsistency:
     """Regression: WhatsApp session keys must collapse JID/LID aliases to a
     single stable identity for both DM chat_ids and group participant_ids."""
-
-    @pytest.mark.parametrize(
-        "source",
-        [
-            SessionSource(platform=Platform.TELEGRAM, chat_id="99", chat_type="dm"),
-            SessionSource(platform=Platform.SLACK, chat_id="C123", chat_type="channel"),
-            SessionSource(platform=Platform.DISCORD, chat_id="guild-1", chat_type="group", user_id="alice"),
-            SessionSource(platform=Platform.TELEGRAM, chat_id="-1001", chat_type="group", thread_id="42", user_id="alice"),
-        ],
-    )
-    def test_funnel_enabled_collapses_all_source_shapes_to_main(self, source):
-        cfg = GatewayConfig(
-            session_funnel=SessionFunnelConfig(enabled=True, strategy="single-agent-main")
-        )
-        assert resolve_session_key(source, config=cfg) == "agent:main:main"
 
     @pytest.fixture()
     def store(self, tmp_path):
@@ -791,71 +860,6 @@ class TestWhatsAppSessionKeyConsistency:
             user_name="Phone User",
         )
         assert store._generate_session_key(source) == build_session_key(source)
-
-    def test_resolve_session_key_matches_build_session_key_without_config(self):
-        source = SessionSource(
-            platform=Platform.WHATSAPP,
-            chat_id="15551234567@s.whatsapp.net",
-            chat_type="dm",
-            user_name="Phone User",
-        )
-
-        assert resolve_session_key(source) == build_session_key(source)
-
-    def test_resolve_session_key_honors_config_isolation_flags(self):
-        source = SessionSource(
-            platform=Platform.DISCORD,
-            chat_id="guild-123",
-            chat_type="group",
-            user_id="alice",
-        )
-        cfg = GatewayConfig(group_sessions_per_user=False)
-
-        assert resolve_session_key(source, config=cfg) == "agent:main:discord:group:guild-123"
-
-    def test_resolve_session_key_collapses_to_main_when_funnel_enabled(self):
-        source = SessionSource(
-            platform=Platform.DISCORD,
-            chat_id="guild-123",
-            chat_type="group",
-            user_id="alice",
-            thread_id="thread-1",
-        )
-        cfg = GatewayConfig(
-            session_funnel=SessionFunnelConfig(enabled=True, strategy="single-agent-main")
-        )
-
-        assert resolve_session_key(source, config=cfg) == "agent:main:main"
-
-    def test_store_uses_main_key_when_funnel_enabled(self, store):
-        store.config.session_funnel = SessionFunnelConfig(enabled=True, strategy="single-agent-main")
-        source = SessionSource(
-            platform=Platform.TELEGRAM,
-            chat_id="99",
-            chat_type="dm",
-        )
-
-        assert store._generate_session_key(source) == "agent:main:main"
-
-    def test_store_preserves_origin_metadata_when_funnel_enabled(self, store):
-        store.config.session_funnel = SessionFunnelConfig(enabled=True, strategy="single-agent-main")
-        source = SessionSource(
-            platform=Platform.TELEGRAM,
-            chat_id="-1002285219667",
-            chat_type="group",
-            thread_id="17585",
-            user_id="alice",
-            user_name="Alice",
-            chat_name="Ops",
-        )
-
-        entry = store.get_or_create_session(source)
-
-        assert entry.session_key == "agent:main:main"
-        assert entry.origin.chat_id == "-1002285219667"
-        assert entry.origin.thread_id == "17585"
-        assert entry.origin.chat_type == "group"
-        assert entry.origin.platform == Platform.TELEGRAM
 
     def test_store_creates_distinct_group_sessions_per_user(self, store):
         first = SessionSource(

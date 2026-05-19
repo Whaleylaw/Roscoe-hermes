@@ -8,7 +8,6 @@ from gateway.config import (
     HomeChannel,
     Platform,
     PlatformConfig,
-    SessionFunnelConfig,
     SessionResetPolicy,
     StreamingConfig,
     _apply_env_overrides,
@@ -57,6 +56,19 @@ class TestPlatformConfigRoundtrip:
     def test_from_dict_coerces_quoted_false_enabled(self):
         restored = PlatformConfig.from_dict({"enabled": "false"})
         assert restored.enabled is False
+
+    def test_gateway_restart_notification_defaults_true(self):
+        assert PlatformConfig().gateway_restart_notification is True
+        assert PlatformConfig.from_dict({}).gateway_restart_notification is True
+
+    def test_gateway_restart_notification_roundtrip_false(self):
+        pc = PlatformConfig(enabled=True, gateway_restart_notification=False)
+        restored = PlatformConfig.from_dict(pc.to_dict())
+        assert restored.gateway_restart_notification is False
+
+    def test_gateway_restart_notification_coerces_quoted_false(self):
+        restored = PlatformConfig.from_dict({"gateway_restart_notification": "false"})
+        assert restored.gateway_restart_notification is False
 
 
 class TestGetConnectedPlatforms:
@@ -152,6 +164,10 @@ class TestSessionResetPolicy:
 
 
 class TestStreamingConfig:
+    def test_defaults_to_edit_transport(self):
+        restored = StreamingConfig.from_dict({"enabled": "true"})
+        assert restored.transport == "edit"
+
     def test_from_dict_coerces_quoted_false_enabled(self):
         restored = StreamingConfig.from_dict({"enabled": "false"})
         assert restored.enabled is False
@@ -164,8 +180,8 @@ class TestStreamingConfig:
                 "fresh_final_after_seconds": "oops",
             }
         )
-        assert restored.edit_interval == 1.0
-        assert restored.buffer_threshold == 40
+        assert restored.edit_interval == 0.8
+        assert restored.buffer_threshold == 24
         assert restored.fresh_final_after_seconds == 60.0
 
 
@@ -183,19 +199,16 @@ class TestGatewayConfigRoundtrip:
             quick_commands={"limits": {"type": "exec", "command": "echo ok"}},
             group_sessions_per_user=False,
             thread_sessions_per_user=True,
-            session_funnel=SessionFunnelConfig(enabled=True, strategy="single-agent-main"),
         )
         d = config.to_dict()
         restored = GatewayConfig.from_dict(d)
 
         assert Platform.TELEGRAM in restored.platforms
-        assert restored.platforms[Platform.TELEGRAM].token is not None
+        assert restored.platforms[Platform.TELEGRAM].token == "tok_123"
         assert restored.reset_triggers == ["/new"]
         assert restored.quick_commands == {"limits": {"type": "exec", "command": "echo ok"}}
         assert restored.group_sessions_per_user is False
         assert restored.thread_sessions_per_user is True
-        assert restored.session_funnel.enabled is True
-        assert restored.session_funnel.strategy == "single-agent-main"
 
     def test_roundtrip_preserves_unauthorized_dm_behavior(self):
         config = GatewayConfig(
@@ -293,42 +306,42 @@ class TestLoadGatewayConfig:
 
         assert config.thread_sessions_per_user is False
 
-    def test_bridges_session_funnel_from_config_yaml_nested_gateway(self, tmp_path, monkeypatch):
+    def test_bridges_discord_thread_require_mention_from_config_yaml(self, tmp_path, monkeypatch):
+        """discord.thread_require_mention in config.yaml should reach the runtime env var."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
-            "gateway:\n"
-            "  sessionFunnel:\n"
-            "    enabled: true\n"
-            "    strategy: single-agent-main\n",
+            "discord:\n"
+            "  thread_require_mention: true\n",
             encoding="utf-8",
         )
 
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("DISCORD_THREAD_REQUIRE_MENTION", raising=False)
 
-        config = load_gateway_config()
+        load_gateway_config()
 
-        assert config.session_funnel.enabled is True
-        assert config.session_funnel.strategy == "single-agent-main"
+        assert os.environ.get("DISCORD_THREAD_REQUIRE_MENTION") == "true"
 
-    def test_bridges_session_funnel_from_config_yaml_top_level(self, tmp_path, monkeypatch):
+    def test_thread_require_mention_yaml_does_not_overwrite_env(self, tmp_path, monkeypatch):
+        """Explicit env var should win over config.yaml (env > yaml precedence)."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
-            "session_funnel:\n"
-            "  enabled: true\n"
-            "  strategy: single-agent-main\n",
+            "discord:\n"
+            "  thread_require_mention: false\n",
             encoding="utf-8",
         )
 
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("DISCORD_THREAD_REQUIRE_MENTION", "true")  # user override
 
-        config = load_gateway_config()
+        load_gateway_config()
 
-        assert config.session_funnel.enabled is True
-        assert config.session_funnel.strategy == "single-agent-main"
+        # Env value preserved, not clobbered by yaml.
+        assert os.environ.get("DISCORD_THREAD_REQUIRE_MENTION") == "true"
 
     def test_bridges_quoted_false_platform_enabled_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
@@ -399,6 +412,26 @@ class TestLoadGatewayConfig:
             "123": "Research mode",
             "456": "Therapist mode",
         }
+
+    def test_bridges_discord_history_backfill_settings_from_config_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "discord:\n"
+            "  history_backfill: true\n"
+            "  history_backfill_limit: 17\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("DISCORD_HISTORY_BACKFILL", raising=False)
+        monkeypatch.delenv("DISCORD_HISTORY_BACKFILL_LIMIT", raising=False)
+
+        load_gateway_config()
+
+        assert os.getenv("DISCORD_HISTORY_BACKFILL") == "true"
+        assert os.getenv("DISCORD_HISTORY_BACKFILL_LIMIT") == "17"
 
     def test_bridges_telegram_channel_prompts_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
@@ -517,6 +550,26 @@ class TestLoadGatewayConfig:
         config = load_gateway_config()
 
         assert config.platforms[Platform.TELEGRAM].extra["disable_link_previews"] is True
+
+    def test_bridges_telegram_extra_base_url_from_config_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "telegram:\n"
+            "  extra:\n"
+            "    base_url: https://custom-proxy.example.com/bot\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert (
+            config.platforms[Platform.TELEGRAM].extra["base_url"]
+            == "https://custom-proxy.example.com/bot"
+        )
 
     def test_bridges_notice_delivery_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
@@ -650,55 +703,3 @@ class TestHomeChannelEnvOverrides:
             home = config.platforms[platform].home_channel
             assert home is not None, f"{platform.value}: home_channel should not be None"
             assert (home.chat_id, home.name) == expected, platform.value
-
-
-class TestSessionFunnelEnvOverrides:
-    def test_env_overrides_session_funnel_enabled(self):
-        config = GatewayConfig()
-        assert config.session_funnel.enabled is False
-
-        with patch.dict(os.environ, {"HERMES_SESSION_FUNNEL_ENABLED": "true"}, clear=True):
-            _apply_env_overrides(config)
-
-        assert config.session_funnel.enabled is True
-
-    def test_env_overrides_session_funnel_strategy(self):
-        config = GatewayConfig()
-
-        with patch.dict(
-            os.environ,
-            {
-                "HERMES_SESSION_FUNNEL_ENABLED": "true",
-                "HERMES_SESSION_FUNNEL_STRATEGY": "single-agent-main",
-            },
-            clear=True,
-        ):
-            _apply_env_overrides(config)
-
-        assert config.session_funnel.enabled is True
-        assert config.session_funnel.strategy == "single-agent-main"
-
-
-import logging
-
-from gateway.config import GatewayConfig, UnifiedTimelineConfig
-
-
-def test_unified_timeline_enabled_by_default():
-    cfg = GatewayConfig()
-    assert cfg.unified_timeline.enabled is True
-
-
-def test_unified_timeline_round_trip():
-    cfg = GatewayConfig(unified_timeline=UnifiedTimelineConfig(enabled=False))
-    restored = GatewayConfig.from_dict(cfg.to_dict())
-    assert restored.unified_timeline.enabled is False
-
-
-def test_session_funnel_enabled_maps_to_unified_timeline_with_warning(caplog):
-    data = {"session_funnel": {"enabled": True, "strategy": "single-agent-main"}}
-    with caplog.at_level(logging.WARNING):
-        cfg = GatewayConfig.from_dict(data)
-    assert cfg.unified_timeline.enabled is True
-    assert any("session_funnel" in rec.message and "deprecated" in rec.message.lower()
-               for rec in caplog.records)

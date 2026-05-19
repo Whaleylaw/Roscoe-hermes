@@ -1,9 +1,10 @@
 ---
 name: google-workspace
-description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs integration for Hermes. For Aaron/Lawyer Incorporated, use the Domain-Wide Delegation service-account helper (`scripts/google_api.py`) at `~/.hermes/auth/gws-sa.json`; do not use OAuth or `gws auth login` for Gmail unless explicitly requested.
-version: 1.0.1
+description: "Gmail, Calendar, Drive, Docs, Sheets via gws CLI or Python."
+version: 1.1.0
 author: Nous Research
 license: MIT
+platforms: [linux, macos, windows]
 required_credential_files:
   - path: google_token.json
     description: Google OAuth2 token (created by setup script)
@@ -18,7 +19,7 @@ metadata:
 
 # Google Workspace
 
-Gmail, Calendar, Drive, Contacts, Sheets, and Docs. In Aaron's environment, Gmail access is through a service account with Domain-Wide Delegation (DWD), not user OAuth. Use the bundled `scripts/google_api.py` helper directly; it reads `~/.hermes/auth/gws-sa.json` and impersonates Aaron. Do **not** tell Aaron to run `gws auth login` for Gmail unless he explicitly asks for user-OAuth mode.
+Gmail, Calendar, Drive, Contacts, Sheets, and Docs — through Hermes-managed OAuth and a thin CLI wrapper. When `gws` is installed, the skill uses it as the execution backend for broader Google Workspace coverage; otherwise it falls back to the bundled Python client implementation.
 
 ## References
 
@@ -26,8 +27,8 @@ Gmail, Calendar, Drive, Contacts, Sheets, and Docs. In Aaron's environment, Gmai
 
 ## Scripts
 
-- `scripts/setup.py` — legacy OAuth2 setup (only use for non-DWD/user-OAuth environments)
-- `scripts/google_api.py` — primary Workspace CLI for this machine. When `~/.hermes/auth/gws-sa.json` exists, it bypasses `gws` and uses Domain-Wide Delegation service-account impersonation directly.
+- `scripts/setup.py` — OAuth2 setup (run once to authorize)
+- `scripts/google_api.py` — compatibility wrapper CLI. It prefers `gws` for operations when available, while preserving Hermes' existing JSON output contract.
 
 ## First-Time Setup
 
@@ -163,62 +164,13 @@ Should print `AUTHENTICATED`. Setup is complete — token refreshes automaticall
 - If `gws` is installed, `google_api.py` points it at the same `~/.hermes/google_token.json` credentials file. Users do not need to run a separate `gws auth login` flow.
 - To revoke: `$GSETUP --revoke`
 
-### Alternative: Service Account + Domain-Wide Delegation (headless / agent use)
-
-For Workspace domains where you control admin, you can skip user-OAuth entirely
-and run with a service account that impersonates a user via Domain-Wide
-Delegation. No browser flow, no consent screen, no token to refresh.
-
-Requires a Workspace super-admin. When an SA key is configured the skill uses
-the native Python google-auth library directly (the `gws` CLI does not
-currently support DWD impersonation —
-[googleworkspace/cli#632](https://github.com/googleworkspace/cli/issues/632)).
-Other gws-only features (helper commands, broader discovery surface) remain
-available from your shell using separate user-OAuth credentials.
-
-1. Create a service account in your GCP project and download a JSON key.
-2. In Workspace Admin Console → Security → Access and data control → API
-   controls → Domain-wide Delegation, add the SA's client ID. Use **exactly**
-   these scopes (DWD requires exact-string match — broader scopes don't
-   imply narrower ones):
-   - `https://www.googleapis.com/auth/gmail.modify`
-   - `https://www.googleapis.com/auth/gmail.compose`
-   - `https://www.googleapis.com/auth/gmail.send`
-   - `https://www.googleapis.com/auth/calendar`
-   - `https://www.googleapis.com/auth/drive`
-   - `https://www.googleapis.com/auth/contacts.readonly`
-   - `https://www.googleapis.com/auth/spreadsheets`
-   - `https://www.googleapis.com/auth/documents`
-3. Add a top-level `"subject": "you@yourdomain.com"` field to the JSON key file
-   so the skill knows which user to impersonate. (Override at runtime with
-   `HERMES_GOOGLE_IMPERSONATE=user@yourdomain.com` if needed.)
-4. Save the JSON to `~/.hermes/auth/gws-sa.json` with `chmod 600` (or set
-   `HERMES_GOOGLE_SA_KEY_FILE=/abs/path/to/key.json`).
-5. On the GCP project's IAM page, grant the impersonated user the
-   **Service Usage Consumer** role (Owner is sufficient if they're already a
-   project owner) so they can consume API quota on the SA's project.
-
-When that file is present, `google_api.py` skips `gws` entirely and uses
-`google.oauth2.service_account.Credentials.with_subject(...)` directly. The
-SA mints fresh JWT-backed access tokens on every call — no refresh-token
-expiry. Audit logs still attribute calls to the impersonated user.
-
 ## Usage
 
-All commands go through the API script. On this machine, prefer the repo copy so DWD behavior is explicit:
+All commands go through the API script. Set `GAPI` as a shorthand:
 
 ```bash
-GAPI="python3 $HOME/Github/Roscoe-hermes/skills/productivity/google-workspace/scripts/google_api.py"
+GAPI="python ${HERMES_HOME:-$HOME/.hermes}/skills/productivity/google-workspace/scripts/google_api.py"
 ```
-
-Preflight:
-
-```bash
-test -f "$HOME/.hermes/auth/gws-sa.json"
-$GAPI gmail search "in:inbox" --max 1
-```
-
-If `gws gmail ...` fails with `invalid_grant` / `invalid_rapt`, that does **not** mean Gmail is unavailable. Switch to `$GAPI` above; `gws` uses user OAuth, while `$GAPI` uses the service account/DWD path.
 
 ### Gmail
 
@@ -239,14 +191,6 @@ $GAPI gmail send --to user@example.com --subject "Hello" --from '"Research Agent
 # Reply (automatically threads and sets In-Reply-To)
 $GAPI gmail reply MESSAGE_ID --body "Thanks, that works for me."
 $GAPI gmail reply MESSAGE_ID --from '"Support Bot" <user@example.com>' --body "Thanks"
-
-# Draft — same flags as `send`, but stored under Drafts instead of sending.
-# Returns {status: "drafted", id: DRAFT_ID, messageId, threadId}.
-$GAPI gmail draft --to user@example.com --subject "Hello" --body "Message text"
-$GAPI gmail draft --to user@example.com --subject "Reply re X" --body "..." --thread-id THREAD_ID
-
-# Send a previously-created draft by its draft id
-$GAPI gmail draft-send DRAFT_ID
 
 # Labels
 $GAPI gmail labels
@@ -273,8 +217,36 @@ $GAPI calendar delete EVENT_ID
 ### Drive
 
 ```bash
+# Search existing files
 $GAPI drive search "quarterly report" --max 10
 $GAPI drive search "mimeType='application/pdf'" --raw-query --max 5
+
+# Get metadata for a single file
+$GAPI drive get FILE_ID
+
+# Upload a local file (auto-detects MIME type)
+$GAPI drive upload /path/to/report.pdf
+$GAPI drive upload /path/to/image.png --name "Logo.png" --parent FOLDER_ID
+
+# Download (binary files download as-is; Google-native files export to a
+# sensible default — Docs→pdf, Sheets→csv, Slides→pdf, Drawings→png)
+$GAPI drive download FILE_ID
+$GAPI drive download DOC_ID --output ~/doc.pdf
+$GAPI drive download DOC_ID --export-mime text/plain --output ~/doc.txt
+
+# Create a folder
+$GAPI drive create-folder "Reports"
+$GAPI drive create-folder "Q4" --parent FOLDER_ID
+
+# Share
+$GAPI drive share FILE_ID --email alice@example.com --role reader
+$GAPI drive share FILE_ID --email alice@example.com --role writer --notify
+$GAPI drive share FILE_ID --type anyone --role reader        # anyone with link
+$GAPI drive share FILE_ID --type domain --domain example.com --role reader
+
+# Delete — defaults to trash (reversible). Use --permanent to skip the trash.
+$GAPI drive delete FILE_ID
+$GAPI drive delete FILE_ID --permanent
 ```
 
 ### Contacts
@@ -286,6 +258,10 @@ $GAPI contacts list --max 20
 ### Sheets
 
 ```bash
+# Create a new spreadsheet
+$GAPI sheets create --title "Q4 Budget"
+$GAPI sheets create --title "Inventory" --sheet-name "Stock"
+
 # Read
 $GAPI sheets get SHEET_ID "Sheet1!A1:D10"
 
@@ -299,7 +275,15 @@ $GAPI sheets append SHEET_ID "Sheet1!A:C" --values '[["new","row","data"]]'
 ### Docs
 
 ```bash
+# Read
 $GAPI docs get DOC_ID
+
+# Create a new Doc (optionally seeded with body text)
+$GAPI docs create --title "Meeting Notes"
+$GAPI docs create --title "Draft" --body "First paragraph..."
+
+# Append text to the end of an existing Doc
+$GAPI docs append DOC_ID --text "Additional content to append"
 ```
 
 ## Output Format
@@ -308,19 +292,27 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 - **Gmail search**: `[{id, threadId, from, to, subject, date, snippet, labels}]`
 - **Gmail get**: `{id, threadId, from, to, subject, date, labels, body}`
-- **Gmail send/reply/draft-send**: `{status: "sent", id, threadId}`
-- **Gmail draft**: `{status: "drafted", id, messageId, threadId}`
+- **Gmail send/reply**: `{status: "sent", id, threadId}`
 - **Calendar list**: `[{id, summary, start, end, location, description, htmlLink}]`
 - **Calendar create**: `{status: "created", id, summary, htmlLink}`
 - **Drive search**: `[{id, name, mimeType, modifiedTime, webViewLink}]`
+- **Drive get**: `{id, name, mimeType, modifiedTime, size, webViewLink, parents, owners}`
+- **Drive upload**: `{status: "uploaded", id, name, mimeType, webViewLink}`
+- **Drive download**: `{status: "downloaded", id, name, path, mimeType}`
+- **Drive create-folder**: `{status: "created", id, name, webViewLink}`
+- **Drive share**: `{status: "shared", permissionId, fileId, role, type}`
+- **Drive delete**: `{status: "trashed" | "deleted", fileId, permanent}`
 - **Contacts list**: `[{name, emails: [...], phones: [...]}]`
 - **Sheets get**: `[[cell, cell, ...], ...]`
+- **Sheets create**: `{status: "created", spreadsheetId, title, spreadsheetUrl}`
+- **Docs create**: `{status: "created", documentId, title, url}`
+- **Docs append**: `{status: "appended", documentId, inserted_at, characters}`
 
 ## Rules
 
-1. **For Aaron/Lawyer Incorporated Gmail, use `$GAPI` / `google_api.py` with DWD first. Do not ask Aaron to reauth or run `gws auth login` just because `gws`/OAuth fails.**
-2. **Never send email or create/delete events without confirming with the user first.** Show the draft content and ask for approval.
-3. **For complex Gmail queries, use the Gmail search syntax reference** — load `references/gmail-search-syntax.md`.
+1. **Never send email, create/delete calendar events, delete Drive files, share files, or modify Docs/Sheets without confirming with the user first.** Show what will be done (recipients, file IDs, content, share role) and ask for approval. For `drive delete`, prefer the default trash (reversible) over `--permanent`.
+2. **Check auth before first use** — run `setup.py --check`. If it fails, guide the user through setup.
+3. **Use the Gmail search syntax reference** for complex queries — load it with `skill_view("google-workspace", file_path="references/gmail-search-syntax.md")`.
 4. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g., `2026-03-01T10:00:00-06:00`) or UTC (`Z`).
 5. **Respect rate limits** — avoid rapid-fire sequential API calls. Batch reads when possible.
 
@@ -328,12 +320,13 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 | Problem | Fix |
 |---------|-----|
-| `NOT_AUTHENTICATED` from `gws` or `invalid_grant` / `invalid_rapt` | Do **not** ask Aaron to reauth first. Use `python3 $HOME/Github/Roscoe-hermes/skills/productivity/google-workspace/scripts/google_api.py` so the DWD service account is used. |
-| DWD preflight fails | Verify `~/.hermes/auth/gws-sa.json` exists, is chmod 600, has a `subject`, and the Workspace DWD scopes match exactly. |
-| `HttpError 403: Insufficient Permission` | Missing DWD scope or API not enabled — check Workspace Admin DWD scopes and GCP APIs. |
-| `HttpError 403: Access Not Configured` | API not enabled — enable it in Google Cloud Console for the service-account project. |
-| `ModuleNotFoundError` | Run `$GSETUP --install-deps` or install the missing google client package in the active venv. |
-| Advanced Protection blocks OAuth auth | Only relevant in legacy OAuth mode; DWD should bypass user consent flows. |
+| `NOT_AUTHENTICATED` | Run setup Steps 2-5 above |
+| `REFRESH_FAILED` | Token revoked or expired — redo Steps 3-5 |
+| `HttpError 403: Insufficient Permission` | Missing API scope — `$GSETUP --revoke` then redo Steps 3-5 |
+| `AUTHENTICATED (partial)` or "Token missing scopes" | New write capabilities (Drive write/delete, Docs create/edit) require re-authorization. `$GSETUP --revoke` then redo Steps 3-5 to grant the upgraded scopes. |
+| `HttpError 403: Access Not Configured` | API not enabled — user needs to enable it in Google Cloud Console |
+| `ModuleNotFoundError` | Run `$GSETUP --install-deps` |
+| Advanced Protection blocks auth | Workspace admin must allowlist the OAuth client ID |
 
 ## Revoking Access
 

@@ -11,7 +11,8 @@ Exposes an HTTP server with endpoints:
 - POST /v1/runs                    — start a run, returns run_id immediately (202)
 - GET  /v1/runs/{run_id}           — retrieve current run status
 - GET  /v1/runs/{run_id}/events    — SSE stream of structured lifecycle events
-- POST /v1/runs/{run_id}/stop    — interrupt a running agent
+- POST /v1/runs/{run_id}/approval — resolve a pending run approval
+- POST /v1/runs/{run_id}/stop       — interrupt a running agent
 - GET  /health                     — health check
 - GET  /health/detailed            — rich status for cross-container dashboard probing
 
@@ -44,14 +45,11 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
-from gateway.conversational_memory_context import maybe_prepend_conversational_memory_context
 from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
     is_network_accessible,
 )
-from gateway.session import SessionSource, _timeline_rows_to_openai_messages
-from gateway.unified_timeline import TurnHandle, UnifiedTimeline
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +61,6 @@ MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversation
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
-_CONVERSATIONAL_MEMORY_BOUNDARY_COMMANDS = {
-    "/new": "Started a new conversation. The previous topic has been saved to memory.",
-    "/clear": "Started a new conversation. The previous topic has been saved to memory.",
-    "/reset": "Reset acknowledged. The previous topic has been saved to memory.",
-    "/compress": "Compression acknowledged. The current topic has been saved to memory.",
-}
 
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
@@ -77,6 +69,35 @@ def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+_TRUE_REQUEST_BOOL_STRINGS = frozenset({"1", "true", "yes", "on"})
+_FALSE_REQUEST_BOOL_STRINGS = frozenset({"0", "false", "no", "off"})
+
+
+def _coerce_request_bool(value: Any, default: bool = False) -> bool:
+    """Normalize boolean-like API payload values.
+
+    External clients should send real JSON booleans, but some OpenAI-compatible
+    frontends and middleware serialize flags like ``stream`` as strings.  Using
+    Python truthiness on those values misroutes requests because ``"false"`` is
+    still truthy.  Treat only explicit bool-ish scalars as booleans; everything
+    else falls back to the caller's default.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_REQUEST_BOOL_STRINGS:
+            return True
+        if normalized in _FALSE_REQUEST_BOOL_STRINGS:
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
 
 
 def _normalize_chat_content(
@@ -279,16 +300,6 @@ def _content_has_visible_payload(content: Any) -> bool:
     return False
 
 
-def _conversational_memory_boundary_response(content: Any) -> Optional[str]:
-    """Return a local API reply for memory boundary slash commands."""
-    try:
-        text = _normalize_chat_content(content)
-    except Exception:
-        text = str(content) if content is not None else ""
-    command = text.strip().lower().split(maxsplit=1)[0] if text.strip() else ""
-    return _CONVERSATIONAL_MEMORY_BOUNDARY_COMMANDS.get(command)
-
-
 def _multimodal_validation_error(exc: ValueError, *, param: str) -> "web.Response":
     """Translate a ``_normalize_multimodal_content`` ValueError into a 400 response."""
     raw = str(exc)
@@ -330,7 +341,12 @@ class ResponseStore:
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
         except Exception:
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        # Use shared WAL-fallback helper so response_store.db degrades
+        # gracefully on NFS/SMB/FUSE-mounted HERMES_HOME (same filesystem
+        # issue addressed for state.db/kanban.db — see
+        # hermes_state._WAL_INCOMPAT_MARKERS).
+        from hermes_state import apply_wal_with_fallback
+        apply_wal_with_fallback(self._conn, db_label="response_store.db")
         self._conn.execute(
             """CREATE TABLE IF NOT EXISTS responses (
                 response_id TEXT PRIMARY KEY,
@@ -369,15 +385,34 @@ class ResponseStore:
         # Evict oldest entries beyond max_size
         count = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0]
         if count > self._max_size:
-            self._conn.execute(
-                "DELETE FROM responses WHERE response_id IN "
-                "(SELECT response_id FROM responses ORDER BY accessed_at ASC LIMIT ?)",
-                (count - self._max_size,),
-            )
+            # Collect IDs that will be evicted
+            evict_ids = [
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT response_id FROM responses ORDER BY accessed_at ASC LIMIT ?",
+                    (count - self._max_size,),
+                ).fetchall()
+            ]
+            if evict_ids:
+                placeholders = ",".join("?" for _ in evict_ids)
+                # Clear conversation mappings pointing to evicted responses
+                self._conn.execute(
+                    f"DELETE FROM conversations WHERE response_id IN ({placeholders})",
+                    evict_ids,
+                )
+                # Delete evicted responses
+                self._conn.execute(
+                    f"DELETE FROM responses WHERE response_id IN ({placeholders})",
+                    evict_ids,
+                )
         self._conn.commit()
 
     def delete(self, response_id: str) -> bool:
         """Remove a response from the store. Returns True if found and deleted."""
+        # Clear conversation mappings pointing to this response
+        self._conn.execute(
+            "DELETE FROM conversations WHERE response_id = ?", (response_id,)
+        )
         cursor = self._conn.execute(
             "DELETE FROM responses WHERE response_id = ?", (response_id,)
         )
@@ -417,10 +452,7 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": (
-        "Authorization, Content-Type, Idempotency-Key, "
-        "X-Hermes-Session-Id, X-Hermes-Use-Unified-Timeline"
-    ),
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
 }
 
 
@@ -465,7 +497,7 @@ if AIOHTTP_AVAILABLE:
     @web.middleware
     async def body_limit_middleware(request, handler):
         """Reject overly large request bodies early based on Content-Length."""
-        if request.method in ("POST", "PUT", "PATCH"):
+        if request.method in {"POST", "PUT", "PATCH"}:
             cl = request.headers.get("Content-Length")
             if cl is not None:
                 try:
@@ -478,7 +510,12 @@ else:
     body_limit_middleware = None  # type: ignore[assignment]
 
 _SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
     "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-XSS-Protection": "0",
     "Referrer-Policy": "no-referrer",
 }
 
@@ -567,21 +604,6 @@ def _derive_chat_session_id(
     return f"api-{digest}"
 
 
-def _conversation_stats(messages: List[Dict[str, Any]]) -> tuple[int, int]:
-    """Return (message_count, rough_content_chars) for diagnostic logging."""
-    total_chars = 0
-    for msg in messages or []:
-        content = msg.get("content", "") if isinstance(msg, dict) else ""
-        try:
-            if isinstance(content, str):
-                total_chars += len(content)
-            else:
-                total_chars += len(_normalize_chat_content(content))
-        except Exception:
-            total_chars += len(str(content))
-    return len(messages or []), total_chars
-
-
 _CRON_AVAILABLE = False
 try:
     from cron.jobs import (
@@ -642,13 +664,11 @@ class APIServerAdapter(BasePlatformAdapter):
         self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
         # Pollable run status for dashboards and external control-plane UIs.
         self._run_statuses: Dict[str, Dict[str, Any]] = {}
+        # Active approval session key for each run_id.  The approval core
+        # resolves requests by session key, while API clients address the
+        # in-flight run by run_id.
+        self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
-        # Lazy-loaded GatewayConfig for consulting feature flags
-        # (e.g. ``unified_timeline.enabled``).  The adapter is constructed
-        # with only a PlatformConfig, so we fetch the full GatewayConfig on
-        # demand.  Can be overridden by tests via ``set_gateway_config``.
-        self._gateway_config: Optional[Any] = None
-        self._agent_runtime_warmup_task: Optional["asyncio.Task[None]"] = None
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -679,7 +699,7 @@ class APIServerAdapter(BasePlatformAdapter):
         try:
             from hermes_cli.profiles import get_active_profile_name
             profile = get_active_profile_name()
-            if profile and profile not in ("default", "custom"):
+            if profile and profile not in {"default", "custom"}:
                 return profile
         except Exception:
             pass
@@ -824,182 +844,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 logger.debug("SessionDB unavailable for API server: %s", e)
         return self._session_db
 
-    def set_gateway_config(self, config: Any) -> None:
-        """Inject the gateway-level config (used by the runner and tests)."""
-        self._gateway_config = config
-
-    def _ensure_gateway_config(self) -> Optional[Any]:
-        """Lazily load the gateway-level config (for feature-flag checks).
-
-        The adapter is constructed with a ``PlatformConfig``; feature flags
-        like ``unified_timeline.enabled`` live on the top-level
-        ``GatewayConfig``. We load it on first use and cache the result.
-        """
-        if self._gateway_config is None:
-            try:
-                from gateway.config import load_gateway_config
-                self._gateway_config = load_gateway_config()
-            except Exception as e:
-                logger.debug("GatewayConfig unavailable for API server: %s", e)
-        return self._gateway_config
-
-    def _unified_timeline_enabled(self) -> bool:
-        """Return True when the unified-timeline rollout is enabled."""
-        cfg = self._ensure_gateway_config()
-        ut_cfg = getattr(cfg, "unified_timeline", None) if cfg is not None else None
-        return bool(ut_cfg and getattr(ut_cfg, "enabled", False))
-
-    def _load_unified_timeline_history(self) -> List[Dict[str, str]]:
-        """Load the active profile's unified timeline in OpenAI message format.
-
-        Returns ``[]`` on any failure. The unified timeline is the single
-        source of truth for cross-channel context when explicitly requested.
-        """
-        db = self._ensure_session_db()
-        if db is None:
-            return []
-        try:
-            ut = UnifiedTimeline.for_active_profile(db=db)
-            rows = db.get_timeline_messages(profile_id=ut.profile_id)
-        except Exception as e:
-            logger.warning("Failed to load unified timeline history: %s", e)
-            return []
-        return _timeline_rows_to_openai_messages(rows)
-
-    def _request_wants_unified_timeline_context(self, request: "web.Request") -> bool:
-        """Return True when an API client explicitly opts into profile history.
-
-        API clients such as Open WebUI already send their own conversation
-        history. Pulling the whole profile-wide timeline implicitly makes tiny
-        requests inherit Telegram/cron/Slack history and can balloon one-line
-        turns into tens of thousands of prompt tokens. We still record API
-        turns into the unified timeline, but reading that cross-channel history
-        is opt-in for API calls.
-        """
-        value = request.headers.get("X-Hermes-Use-Unified-Timeline", "")
-        return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-    def _record_inbound_timeline(
-        self, *, session_id: str, user_message: Any, request: "web.Request",
-    ) -> Optional[TurnHandle]:
-        """Record an inbound turn on the unified timeline.
-
-        Returns a ``TurnHandle`` so the caller can close the loop with
-        :meth:`_record_outbound_timeline`. Returns ``None`` when the feature
-        is disabled or SessionDB is unavailable — the caller should treat a
-        ``None`` handle as "don't record the outbound side either".
-        """
-        if not self._unified_timeline_enabled():
-            return None
-        db = self._ensure_session_db()
-        if db is None:
-            return None
-        # Reduce the user message to plain text for the timeline. Multimodal
-        # parts are flattened via the existing normalizer so the row has
-        # something readable; the agent still sees the full content.
-        try:
-            content = _normalize_chat_content(user_message)
-        except Exception:
-            content = str(user_message) if user_message is not None else ""
-        try:
-            source = SessionSource(
-                platform=Platform.API_SERVER,
-                chat_id=session_id or "openai-default",
-                chat_type="dm",
-                user_id=request.headers.get("X-User-Id"),
-                user_name=None,
-            )
-            ut = UnifiedTimeline.for_active_profile(db=db)
-            return ut.record_inbound(
-                source=source,
-                content=content,
-                message_id=None,
-            )
-        except Exception as e:
-            logger.warning("unified_timeline record_inbound failed: %s", e)
-            return None
-
-    def _record_outbound_timeline(
-        self, *, turn_handle: Optional[TurnHandle], content: str,
-    ) -> None:
-        """Record an outbound reply tied to an earlier inbound turn."""
-        if turn_handle is None or not content:
-            return
-        db = self._ensure_session_db()
-        if db is None:
-            return
-        try:
-            ut = UnifiedTimeline.for_active_profile(db=db)
-            ut.record_outbound(turn=turn_handle, content=content)
-        except Exception as e:
-            logger.warning("unified_timeline record_outbound failed: %s", e)
-
-    def _record_error_outbound_timeline(
-        self, *, turn_handle: Optional[TurnHandle], err_message: str,
-    ) -> None:
-        """Record an error-path outbound so the inbound turn isn't orphaned.
-
-        When ``_compute_completion`` / ``_compute_response`` raises
-        after the inbound row has already been written, skipping the
-        outbound record leaves the timeline with an unanswered user
-        turn.  The next cross-channel context read would then show the
-        agent in a "user is waiting for a reply" state that no longer
-        reflects reality — closing the turn with the error string that
-        actually shipped to the client keeps the timeline honest.
-
-        Mirrors ``GatewayRunner._record_error_outbound`` in
-        ``gateway/run.py``; best-effort, never raises.
-        """
-        if turn_handle is None or not err_message:
-            return
-        try:
-            self._record_outbound_timeline(
-                turn_handle=turn_handle, content=err_message,
-            )
-        except Exception as e:
-            logger.warning(
-                "unified_timeline record_outbound (error path) failed: %s", e,
-            )
-
-    def _prepend_conversational_memory_context_to_system_prompt(
-        self,
-        *,
-        system_prompt: Optional[str],
-        conversation_history: List[Dict[str, Any]],
-        user_message: Any,
-        session_id: str,
-    ) -> Optional[str]:
-        """Layer passive standalone memory recall into the API agent prompt."""
-        try:
-            from hermes_cli.profiles import get_active_profile_name
-
-            profile_id = get_active_profile_name()
-            messages = list(conversation_history or [])
-            messages.append({
-                "role": "user",
-                "content": _normalize_chat_content(user_message),
-            })
-            injected = maybe_prepend_conversational_memory_context(
-                messages=messages,
-                profile_id=profile_id,
-                session_id=session_id,
-            )
-        except Exception as e:
-            logger.warning("Conversational memory context injection failed for API server: %s", e)
-            return system_prompt
-
-        if not injected or injected == messages:
-            return system_prompt
-        first = injected[0]
-        if first.get("role") != "system":
-            return system_prompt
-        context_block = first.get("content")
-        if not isinstance(context_block, str) or not context_block.strip():
-            return system_prompt
-        if system_prompt and system_prompt.strip():
-            return f"{context_block.strip()}\n{system_prompt.strip()}"
-        return context_block.strip()
-
     # ------------------------------------------------------------------
     # Agent creation helper
     # ------------------------------------------------------------------
@@ -1046,7 +890,6 @@ class APIServerAdapter(BasePlatformAdapter):
         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
         fallback_model = GatewayRunner._load_fallback_model()
 
-        start = time.monotonic()
         agent = AIAgent(
             model=model,
             **runtime_kwargs,
@@ -1063,85 +906,10 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_complete_callback=tool_complete_callback,
             session_db=self._ensure_session_db(),
             fallback_model=fallback_model,
-            skip_context_files=True,
-            skip_memory=True,
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
         )
-        logger.info(
-            "[Api_Server] agent created session=%s model=%s provider=%s toolsets=%s elapsed=%.1fs",
-            session_id,
-            model,
-            runtime_kwargs.get("provider"),
-            ",".join(enabled_toolsets),
-            time.monotonic() - start,
-        )
         return agent
-
-    def _schedule_agent_runtime_warmup(self) -> None:
-        """Warm heavy imports/config after the listener is online.
-
-        The API server binds early so health checks and web clients can connect
-        before Telegram/Slack finish startup.  Without this warmup, the first
-        chat request pays the full import/config-discovery cost for run_agent
-        and provider routing, which is especially visible when the machine is
-        under filesystem pressure.
-        """
-        task = self._agent_runtime_warmup_task
-        if task is not None and not task.done():
-            return
-        try:
-            task = asyncio.create_task(self._warm_agent_runtime())
-            self._agent_runtime_warmup_task = task
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
-        except Exception as exc:
-            logger.debug("[Api_Server] failed to schedule agent runtime warmup: %s", exc)
-
-    async def _warm_agent_runtime(self) -> None:
-        loop = asyncio.get_running_loop()
-
-        def _warm() -> None:
-            start = time.monotonic()
-            from run_agent import AIAgent  # noqa: F401
-            from gateway.run import (  # noqa: F401
-                GatewayRunner,
-                _load_gateway_config,
-                _resolve_gateway_model,
-                _resolve_runtime_agent_kwargs,
-            )
-            from hermes_cli.tools_config import _get_platform_tools
-
-            runtime_kwargs = _resolve_runtime_agent_kwargs()
-            model = _resolve_gateway_model()
-            user_config = _load_gateway_config()
-            enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
-            fallback_model = GatewayRunner._load_fallback_model()
-            logger.info(
-                "[Api_Server] agent runtime warmup complete model=%s provider=%s "
-                "toolsets=%s fallback=%s elapsed=%.1fs",
-                model,
-                runtime_kwargs.get("provider"),
-                ",".join(enabled_toolsets),
-                bool(fallback_model),
-                time.monotonic() - start,
-            )
-
-        try:
-            await loop.run_in_executor(None, _warm)
-        except Exception as exc:
-            logger.warning("[Api_Server] agent runtime warmup failed: %s", exc, exc_info=True)
-
-    async def _wait_for_agent_runtime_warmup(self) -> None:
-        task = self._agent_runtime_warmup_task
-        if task is None or task.done():
-            return
-        try:
-            await asyncio.shield(task)
-        except Exception:
-            # The warmup path is an optimization only; _create_agent can still
-            # import/resolve synchronously in the worker thread if warmup fails.
-            pass
 
     # ------------------------------------------------------------------
     # HTTP Handlers
@@ -1212,6 +980,16 @@ class APIServerAdapter(BasePlatformAdapter):
                 "type": "bearer",
                 "required": bool(self._api_key),
             },
+            "runtime": {
+                "mode": "server_agent",
+                "tool_execution": "server",
+                "split_runtime": False,
+                "description": (
+                    "The API server creates a server-side Hermes AIAgent; "
+                    "tools execute on the API-server host unless a future "
+                    "explicit split-runtime mode is enabled."
+                ),
+            },
             "features": {
                 "chat_completions": True,
                 "chat_completions_streaming": True,
@@ -1221,7 +999,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 "run_status": True,
                 "run_events_sse": True,
                 "run_stop": True,
+                "run_approval_response": True,
                 "tool_progress_events": True,
+                "approval_events": True,
                 "session_continuity_header": "X-Hermes-Session-Id",
                 "session_key_header": "X-Hermes-Session-Key",
                 "cors": bool(self._cors_origins),
@@ -1235,13 +1015,13 @@ class APIServerAdapter(BasePlatformAdapter):
                 "runs": {"method": "POST", "path": "/v1/runs"},
                 "run_status": {"method": "GET", "path": "/v1/runs/{run_id}"},
                 "run_events": {"method": "GET", "path": "/v1/runs/{run_id}/events"},
+                "run_approval": {"method": "POST", "path": "/v1/runs/{run_id}/approval"},
                 "run_stop": {"method": "POST", "path": "/v1/runs/{run_id}/stop"},
             },
         })
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
-        request_start = time.monotonic()
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -1259,7 +1039,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=400,
             )
 
-        stream = body.get("stream", False)
+        stream = _coerce_request_bool(body.get("stream"), default=False)
 
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
         system_prompt = None
@@ -1276,7 +1056,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     system_prompt = content
                 else:
                     system_prompt = system_prompt + "\n" + content
-            elif role in ("user", "assistant"):
+            elif role in {"user", "assistant"}:
                 try:
                     content = _normalize_multimodal_content(raw_content)
                 except ValueError as exc:
@@ -1305,23 +1085,14 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
 
-        # X-Hermes-Session-Id is advisory as of the unified-timeline rollout —
-        # the agent's memory comes from the profile's unified timeline, not
-        # from any client-supplied session id. See
-        # docs/superpowers/specs/2026-04-21-unified-timeline-design.md.
-        # The header is still read for client-side response correlation and
-        # for the legacy (unified_timeline disabled) continuation path.
+        # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
+        # When provided, history is loaded from state.db instead of from the request body.
         #
         # Security: session continuation exposes conversation history, so it is
         # only allowed when the API key is configured and the request is
         # authenticated.  Without this gate, any unauthenticated client could
         # read arbitrary session history by guessing/enumerating session IDs.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
-        unified_enabled = self._unified_timeline_enabled()
-        use_unified_context = (
-            unified_enabled and self._request_wants_unified_timeline_context(request)
-        )
-
         if provided_session_id:
             if not self._api_key:
                 logger.warning(
@@ -1343,16 +1114,13 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=400,
                 )
             session_id = provided_session_id
-            if use_unified_context:
-                history = self._load_unified_timeline_history()
-            else:
-                try:
-                    db = self._ensure_session_db()
-                    if db is not None:
-                        history = db.get_messages_as_conversation(session_id)
-                except Exception as e:
-                    logger.warning("Failed to load session history for %s: %s", session_id, e)
-                    history = []
+            try:
+                db = self._ensure_session_db()
+                if db is not None:
+                    history = db.get_messages_as_conversation(session_id)
+            except Exception as e:
+                logger.warning("Failed to load session history for %s: %s", session_id, e)
+                history = []
         else:
             # Derive a stable session ID from the conversation fingerprint so
             # that consecutive messages from the same Open WebUI (or similar)
@@ -1364,78 +1132,11 @@ class APIServerAdapter(BasePlatformAdapter):
                     first_user = cm.get("content", "")
                     break
             session_id = _derive_chat_session_id(system_prompt, first_user)
-            if use_unified_context:
-                # Explicit opt-in only. Default API behavior keeps the
-                # request body's own conversation history so web clients do
-                # not inherit unrelated Telegram/cron/Slack turns.
-                history = self._load_unified_timeline_history()
-            # else: history already set from request body above
-
-        memory_boundary_response = _conversational_memory_boundary_response(user_message)
-        if memory_boundary_response is None:
-            system_prompt = self._prepend_conversational_memory_context_to_system_prompt(
-                system_prompt=system_prompt,
-                conversation_history=history,
-                user_message=user_message,
-                session_id=session_id,
-            )
-
-        history_count, history_chars = _conversation_stats(history)
-        user_chars = len(_normalize_chat_content(user_message))
-        logger.info(
-            "[Api_Server] chat request session=%s stream=%s provided_session=%s "
-            "unified_enabled=%s unified_context=%s history_msgs=%d history_chars=%d "
-            "user_chars=%d parse_elapsed=%.1fs",
-            session_id,
-            bool(stream),
-            bool(provided_session_id),
-            bool(unified_enabled),
-            bool(use_unified_context),
-            history_count,
-            history_chars,
-            user_chars,
-            time.monotonic() - request_start,
-        )
-
-        # Record the inbound turn on the unified timeline (if enabled) so
-        # the agent's reply can be appended when it arrives.
-        turn_handle = self._record_inbound_timeline(
-            session_id=session_id,
-            user_message=user_message,
-            request=request,
-        )
+            # history already set from request body above
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
-
-        if memory_boundary_response is not None:
-            response_headers = {
-                "X-Hermes-Session-Id": session_id,
-            }
-            if gateway_session_key:
-                response_headers["X-Hermes-Session-Key"] = gateway_session_key
-            return web.json_response({
-                "id": completion_id,
-                "object": "chat.completion",
-                "created": created,
-                "model": model_name,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": memory_boundary_response,
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
-            }, headers=response_headers)
 
         if stream:
             import queue as _q
@@ -1459,28 +1160,38 @@ class APIServerAdapter(BasePlatformAdapter):
             _started_tool_call_ids: set[str] = set()
 
             def _on_tool_start(tool_call_id, function_name, function_args):
-                """Emit ``hermes.tool.progress`` with ``status: running``."""
+                """Emit ``hermes.tool.progress`` with ``status: running``.
+
+                Replaces the old ``tool_progress_callback("tool.started",
+                ...)`` emit so SSE consumers receive a single event per
+                tool start, carrying both the legacy ``tool``/``emoji``/
+                ``label`` payload (for #6972 frontends) and the new
+                ``toolCallId``/``status`` correlation fields (#16588).
+
+                Skips tools whose names start with ``_`` so internal
+                events (``_thinking``, …) stay off the wire — matching
+                the prior ``_on_tool_progress`` filter exactly.
+                """
                 if not tool_call_id or function_name.startswith("_"):
                     return
                 _started_tool_call_ids.add(tool_call_id)
                 from agent.display import build_tool_preview, get_tool_emoji
                 label = build_tool_preview(function_name, function_args) or function_name
-                emoji = get_tool_emoji(function_name)
                 _stream_q.put(("__tool_progress__", {
                     "tool": function_name,
-                    "emoji": emoji,
+                    "emoji": get_tool_emoji(function_name),
                     "label": label,
                     "toolCallId": tool_call_id,
                     "status": "running",
                 }))
-                summary = f"{emoji} {label}"
-                _stream_q.put(
-                    f"\n<details type=\"reasoning\" done=\"false\">\n"
-                    f"<summary>{summary}</summary>\nrunning…\n</details>\n"
-                )
 
             def _on_tool_complete(tool_call_id, function_name, function_args, function_result):
-                """Emit the matching ``status: completed`` event."""
+                """Emit the matching ``status: completed`` event.
+
+                Dropped if the start was filtered (internal tool, missing
+                id, or never seen) so clients never get an orphaned
+                ``completed`` they can't correlate to a prior ``running``.
+                """
                 if not tool_call_id or tool_call_id not in _started_tool_call_ids:
                     return
                 _started_tool_call_ids.discard(tool_call_id)
@@ -1489,10 +1200,6 @@ class APIServerAdapter(BasePlatformAdapter):
                     "toolCallId": tool_call_id,
                     "status": "completed",
                 }))
-                _stream_q.put(
-                    f"\n<details type=\"reasoning\" done=\"true\">\n"
-                    f"<summary>✓ {function_name}</summary>\n</details>\n"
-                )
 
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
@@ -1514,16 +1221,13 @@ class APIServerAdapter(BasePlatformAdapter):
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
             ))
-
-            def _finalize_outbound(full_text: str) -> None:
-                self._record_outbound_timeline(
-                    turn_handle=turn_handle, content=full_text,
-                )
+            # Ensure SSE drain loops can terminate without relying on polling
+            # agent_task.done(), which can race with queue timeout checks.
+            agent_task.add_done_callback(lambda _fut: _stream_q.put(None))
 
             return await self._write_sse_chat_completion(
                 request, completion_id, model_name, created, _stream_q,
                 agent_task, agent_ref, session_id=session_id,
-                finalize_cb=_finalize_outbound,
                 gateway_session_key=gateway_session_key,
             )
 
@@ -1544,14 +1248,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_completion)
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
-                err_message = f"Internal server error: {e}"
-                # Close the loop on the unified timeline so the
-                # already-recorded inbound row isn't orphaned.
-                self._record_error_outbound_timeline(
-                    turn_handle=turn_handle, err_message=err_message,
-                )
                 return web.json_response(
-                    _openai_error(err_message, err_type="server_error"),
+                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
                     status=500,
                 )
         else:
@@ -1559,19 +1257,54 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _compute_completion()
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
-                err_message = f"Internal server error: {e}"
-                self._record_error_outbound_timeline(
-                    turn_handle=turn_handle, err_message=err_message,
-                )
                 return web.json_response(
-                    _openai_error(err_message, err_type="server_error"),
+                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
                     status=500,
                 )
 
-        final_response = result.get("final_response", "")
-        if not final_response:
-            final_response = result.get("error", "(No response generated)")
+        final_response = result.get("final_response") or ""
+        is_partial = bool(result.get("partial"))
+        is_failed = bool(result.get("failed"))
+        completed = bool(result.get("completed", True))
+        err_msg = result.get("error")
 
+        # Decide finish_reason. OpenAI uses "length" for truncation, "stop"
+        # for normal completion, and downstream SDKs accept "error" / custom
+        # codes. See issue #22496.
+        if is_partial and err_msg and "truncat" in err_msg.lower():
+            finish_reason = "length"
+        elif is_failed or (not completed and err_msg):
+            finish_reason = "error"
+        else:
+            finish_reason = "stop"
+
+        response_headers = {
+            "X-Hermes-Session-Id": result.get("session_id", session_id),
+        }
+        if gateway_session_key:
+            response_headers["X-Hermes-Session-Key"] = gateway_session_key
+
+        # Hard-fail path: no usable assistant text AND a real failure → 5xx
+        # with OpenAI-style error envelope so SDK clients raise instead of
+        # silently rendering the internal failure string as message.content.
+        if not final_response and (is_failed or is_partial):
+            err_body = _openai_error(
+                err_msg or "Agent run did not produce a response.",
+                err_type="server_error",
+                code="agent_incomplete",
+            )
+            err_body["error"]["hermes"] = {
+                "completed": completed,
+                "partial": is_partial,
+                "failed": is_failed,
+            }
+            response_headers["X-Hermes-Completed"] = "false"
+            response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
+            return web.json_response(err_body, status=502, headers=response_headers)
+
+        # Soft-partial path: we have *some* text but the run did not complete
+        # (e.g. truncation with partial buffered output). Still 200 but signal
+        # truncation via finish_reason="length" + Hermes-specific extras.
         response_data = {
             "id": completion_id,
             "object": "chat.completion",
@@ -1584,7 +1317,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         "role": "assistant",
                         "content": final_response,
                     },
-                    "finish_reason": "stop",
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": {
@@ -1593,34 +1326,24 @@ class APIServerAdapter(BasePlatformAdapter):
                 "total_tokens": usage.get("total_tokens", 0),
             },
         }
+        if is_partial or is_failed or not completed:
+            response_data["hermes"] = {
+                "completed": completed,
+                "partial": is_partial,
+                "failed": is_failed,
+                "error": err_msg,
+                "error_code": "output_truncated" if finish_reason == "length" else "agent_error",
+            }
+            response_headers["X-Hermes-Completed"] = "false"
+            response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
+            if err_msg:
+                response_headers["X-Hermes-Error"] = err_msg[:200]
 
-        # Record the agent's reply on the unified timeline before returning.
-        self._record_outbound_timeline(
-            turn_handle=turn_handle, content=final_response or "",
-        )
-
-        logger.info(
-            "[Api_Server] chat response session=%s elapsed=%.1fs prompt_tokens=%s "
-            "completion_tokens=%s total_tokens=%s response_chars=%d",
-            session_id,
-            time.monotonic() - request_start,
-            usage.get("input_tokens", 0),
-            usage.get("output_tokens", 0),
-            usage.get("total_tokens", 0),
-            len(final_response or ""),
-        )
-
-        response_headers = {
-            "X-Hermes-Session-Id": result.get("session_id", session_id),
-        }
-        if gateway_session_key:
-            response_headers["X-Hermes-Session-Key"] = gateway_session_key
         return web.json_response(response_data, headers=response_headers)
 
     async def _write_sse_chat_completion(
         self, request: "web.Request", completion_id: str, model: str,
         created: int, stream_q, agent_task, agent_ref=None, session_id: str = None,
-        finalize_cb=None,
         gateway_session_key: str = None,
     ) -> "web.StreamResponse":
         """Write real streaming SSE from agent's stream_delta_callback queue.
@@ -1661,10 +1384,6 @@ class APIServerAdapter(BasePlatformAdapter):
             await response.write(f"data: {json.dumps(role_chunk)}\n\n".encode())
             last_activity = time.monotonic()
 
-            # Accumulate streamed text so finalize_cb can record the full
-            # assistant reply on the unified timeline once the stream is done.
-            accumulated_text: List[str] = []
-
             # Helper — route a queue item to the correct SSE event.
             async def _emit(item):
                 """Write a single queue item to the SSE stream.
@@ -1682,8 +1401,6 @@ class APIServerAdapter(BasePlatformAdapter):
                         f"event: hermes.tool.progress\ndata: {event_data}\n\n".encode()
                     )
                 else:
-                    if isinstance(item, str):
-                        accumulated_text.append(item)
                     content_chunk = {
                         "id": completion_id, "object": "chat.completion.chunk",
                         "created": created, "model": model,
@@ -1721,14 +1438,11 @@ class APIServerAdapter(BasePlatformAdapter):
 
             # Get usage from completed agent
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-            agent_final_text = ""
             try:
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
-                if isinstance(result, dict):
-                    agent_final_text = result.get("final_response", "") or ""
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Agent task %s failed, usage data lost: %s", completion_id, exc)
 
             # Finish chunk
             finish_chunk = {
@@ -1743,25 +1457,6 @@ class APIServerAdapter(BasePlatformAdapter):
             }
             await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
             await response.write(b"data: [DONE]\n\n")
-
-            # Record the full assistant reply on the unified timeline.
-            # Prefer accumulated stream deltas; fall back to the agent's
-            # final_response for providers that only emit the full reply at
-            # the end (or when streaming was suppressed by a tool-only turn).
-            #
-            # finalize_cb fires only on the happy path. If the client
-            # disconnects mid-stream the except-block below takes over and
-            # the outbound record is intentionally skipped — recording a
-            # partial reply as "what the agent said" would mislead the next
-            # turn's context load. The inbound row is already persisted so
-            # the user's message isn't lost; the agent just never claims
-            # credit for an interrupted response.
-            if finalize_cb is not None:
-                full_text = "".join(accumulated_text) or agent_final_text
-                try:
-                    finalize_cb(full_text)
-                except Exception as e:  # noqa: BLE001
-                    logger.debug("finalize_cb failed for chat completion: %s", e)
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
             # Client disconnected mid-stream.  Interrupt the agent so it
             # stops making LLM API calls at the next loop iteration, then
@@ -1813,7 +1508,6 @@ class APIServerAdapter(BasePlatformAdapter):
         conversation: Optional[str],
         store: bool,
         session_id: str,
-        finalize_cb=None,
         gateway_session_key: Optional[str] = None,
     ) -> "web.StreamResponse":
         """Write an SSE stream for POST /v1/responses (OpenAI Responses API).
@@ -2319,12 +2013,12 @@ class APIServerAdapter(BasePlatformAdapter):
                     "output_tokens": usage.get("output_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
                 }
-                full_history = list(conversation_history)
-                full_history.append({"role": "user", "content": user_message})
-                if isinstance(result, dict) and result.get("messages"):
-                    full_history.extend(result["messages"])
-                else:
-                    full_history.append({"role": "assistant", "content": final_response_text})
+                full_history = self._build_response_conversation_history(
+                    conversation_history,
+                    user_message,
+                    result,
+                    final_response_text,
+                )
                 _persist_response_snapshot(
                     completed_env,
                     conversation_history_snapshot=full_history,
@@ -2334,42 +2028,6 @@ class APIServerAdapter(BasePlatformAdapter):
                     "type": "response.completed",
                     "response": completed_env,
                 })
-
-                # Record the assistant reply on the unified timeline.
-                #
-                # finalize_cb fires only on the happy path (response.completed
-                # emitted cleanly). If the client disconnects mid-stream the
-                # except-block below takes over and the outbound record is
-                # intentionally skipped — recording a partial reply as "what
-                # the agent said" would mislead the next turn's context load.
-                # The inbound row is already persisted so the user's message
-                # isn't lost; the agent just never claims credit for an
-                # interrupted response.  Failure envelopes (response.failed)
-                # also skip finalize_cb on purpose — same reasoning.
-                if finalize_cb is not None:
-                    try:
-                        finalize_cb(final_response_text or "")
-                    except Exception as e:  # noqa: BLE001
-                        logger.debug("finalize_cb failed for responses: %s", e)
-
-                # Persist for future chaining / GET retrieval, mirroring
-                # the batch path behavior.
-                if store:
-                    full_history = list(conversation_history)
-                    full_history.append({"role": "user", "content": user_message})
-                    if isinstance(result, dict) and result.get("messages"):
-                        full_history.extend(result["messages"])
-                    else:
-                        full_history.append({"role": "assistant", "content": final_response_text})
-                    self._response_store.put(response_id, {
-                        "response": completed_env,
-                        "conversation_history": full_history,
-                        "instructions": instructions,
-                        "session_id": session_id,
-                    })
-                    if conversation:
-                        self._response_store.set_conversation(conversation, response_id)
-
 
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
             _persist_incomplete_if_needed()
@@ -2458,7 +2116,7 @@ class APIServerAdapter(BasePlatformAdapter):
         instructions = body.get("instructions")
         previous_response_id = body.get("previous_response_id")
         conversation = body.get("conversation")
-        store = body.get("store", True)
+        store = _coerce_request_bool(body.get("store"), default=True)
 
         # conversation and previous_response_id are mutually exclusive
         if conversation and previous_response_id:
@@ -2541,24 +2199,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # groups the entire conversation under one session entry.
         session_id = stored_session_id or str(uuid.uuid4())
 
-        # Unified timeline (if enabled) is the single source of truth for
-        # cross-channel continuity — it supersedes client-provided
-        # conversation_history and previous_response_id chaining.  The
-        # response_store still persists per-response data for the
-        # GET /v1/responses/{id} path.
-        unified_enabled = self._unified_timeline_enabled()
-        if unified_enabled:
-            conversation_history = self._load_unified_timeline_history()
-
-        # Record the inbound turn on the unified timeline so the agent's
-        # reply can be appended when it arrives.
-        turn_handle = self._record_inbound_timeline(
-            session_id=session_id,
-            user_message=user_message,
-            request=request,
-        )
-
-        stream = bool(body.get("stream", False))
+        stream = _coerce_request_bool(body.get("stream"), default=False)
         if stream:
             # Streaming branch — emit OpenAI Responses SSE events as the
             # agent runs so frontends can render text deltas and tool
@@ -2612,15 +2253,13 @@ class APIServerAdapter(BasePlatformAdapter):
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
             ))
+            # Ensure SSE drain loops can terminate without relying on polling
+            # agent_task.done(), which can race with queue timeout checks.
+            agent_task.add_done_callback(lambda _fut: _stream_q.put(None))
 
             response_id = f"resp_{uuid.uuid4().hex[:28]}"
             model_name = body.get("model", self._model_name)
             created_at = int(time.time())
-
-            def _finalize_outbound(full_text: str) -> None:
-                self._record_outbound_timeline(
-                    turn_handle=turn_handle, content=full_text,
-                )
 
             return await self._write_sse_responses(
                 request=request,
@@ -2636,7 +2275,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 conversation=conversation,
                 store=store,
                 session_id=session_id,
-                finalize_cb=_finalize_outbound,
                 gateway_session_key=gateway_session_key,
             )
 
@@ -2659,12 +2297,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_response)
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
-                err_message = f"Internal server error: {e}"
-                self._record_error_outbound_timeline(
-                    turn_handle=turn_handle, err_message=err_message,
-                )
                 return web.json_response(
-                    _openai_error(err_message, err_type="server_error"),
+                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
                     status=500,
                 )
         else:
@@ -2672,12 +2306,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _compute_response()
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
-                err_message = f"Internal server error: {e}"
-                self._record_error_outbound_timeline(
-                    turn_handle=turn_handle, err_message=err_message,
-                )
                 return web.json_response(
-                    _openai_error(err_message, err_type="server_error"),
+                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
                     status=500,
                 )
 
@@ -2690,17 +2320,22 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Build the full conversation history for storage
         # (includes tool calls from the agent run)
-        full_history = list(conversation_history)
-        full_history.append({"role": "user", "content": user_message})
-        # Add agent's internal messages if available
-        agent_messages = result.get("messages", [])
-        if agent_messages:
-            full_history.extend(agent_messages)
-        else:
-            full_history.append({"role": "assistant", "content": final_response})
+        full_history = self._build_response_conversation_history(
+            conversation_history,
+            user_message,
+            result,
+            final_response,
+        )
 
-        # Build output items (includes tool calls + final message)
-        output_items = self._extract_output_items(result)
+        # Build output items from the current turn only.  AIAgent returns a
+        # full transcript in result["messages"], while older/mocked paths may
+        # return only the current turn suffix.
+        output_start_index = self._response_messages_turn_start_index(
+            conversation_history,
+            user_message,
+            result,
+        )
+        output_items = self._extract_output_items(result, start_index=output_start_index)
 
         response_data = {
             "id": response_id,
@@ -2728,11 +2363,6 @@ class APIServerAdapter(BasePlatformAdapter):
             # conversation name automatically chains to this response
             if conversation:
                 self._response_store.set_conversation(conversation, response_id)
-
-        # Record the agent's reply on the unified timeline before returning.
-        self._record_outbound_timeline(
-            turn_handle=turn_handle, content=final_response or "",
-        )
 
         response_headers = {"X-Hermes-Session-Id": session_id}
         if gateway_session_key:
@@ -2810,7 +2440,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if cron_err:
             return cron_err
         try:
-            include_disabled = request.query.get("include_disabled", "").lower() in ("true", "1")
+            include_disabled = request.query.get("include_disabled", "").lower() in {"true", "1"}
             jobs = _cron_list(include_disabled=include_disabled)
             return web.json_response({"jobs": jobs})
         except Exception as e:
@@ -2997,17 +2627,70 @@ class APIServerAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _extract_output_items(result: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Build the full output item array from the agent's messages.
+    def _build_response_conversation_history(
+        conversation_history: List[Dict[str, Any]],
+        user_message: Any,
+        result: Dict[str, Any],
+        final_response: Any,
+    ) -> List[Dict[str, Any]]:
+        """Build the stored Responses transcript without duplicating history."""
+        prior = list(conversation_history)
+        current_user = {"role": "user", "content": user_message}
+        agent_messages = result.get("messages") if isinstance(result, dict) else None
 
-        Walks *result["messages"]* and emits:
+        if isinstance(agent_messages, list) and agent_messages:
+            turn_start = APIServerAdapter._response_messages_turn_start_index(
+                conversation_history,
+                user_message,
+                result,
+            )
+            if turn_start:
+                return list(agent_messages)
+
+            full_history = prior
+            full_history.append(current_user)
+            full_history.extend(agent_messages)
+            return full_history
+
+        full_history = prior
+        full_history.append(current_user)
+        full_history.append({"role": "assistant", "content": final_response})
+        return full_history
+
+    @staticmethod
+    def _response_messages_turn_start_index(
+        conversation_history: List[Dict[str, Any]],
+        user_message: Any,
+        result: Dict[str, Any],
+    ) -> int:
+        """Detect transcript-shaped result["messages"] and return turn start."""
+        agent_messages = result.get("messages") if isinstance(result, dict) else None
+        if not isinstance(agent_messages, list) or not agent_messages:
+            return 0
+
+        prior = list(conversation_history)
+        current_user = {"role": "user", "content": user_message}
+        expected_prefix = prior + [current_user]
+        if agent_messages[:len(expected_prefix)] == expected_prefix:
+            return len(expected_prefix)
+        if prior and agent_messages[:len(prior)] == prior:
+            return len(prior)
+        return 0
+
+    @staticmethod
+    def _extract_output_items(result: Dict[str, Any], start_index: int = 0) -> List[Dict[str, Any]]:
+        """
+        Build the output item array from the agent's messages.
+
+        Walks *result["messages"]* starting at *start_index* and emits:
         - ``function_call`` items for each tool_call on assistant messages
         - ``function_call_output`` items for each tool-role message
         - a final ``message`` item with the assistant's text reply
         """
         items: List[Dict[str, Any]] = []
         messages = result.get("messages", [])
+        if start_index > 0:
+            messages = messages[start_index:]
 
         for msg in messages:
             role = msg.get("role")
@@ -3072,18 +2755,9 @@ class APIServerAdapter(BasePlatformAdapter):
         callers (e.g. the SSE writer) to call ``agent.interrupt()`` from
         another thread to stop in-progress LLM calls.
         """
-        await self._wait_for_agent_runtime_warmup()
         loop = asyncio.get_running_loop()
 
         def _run():
-            run_start = time.monotonic()
-            history_count, history_chars = _conversation_stats(conversation_history)
-            logger.info(
-                "[Api_Server] run start session=%s history_msgs=%d history_chars=%d",
-                session_id,
-                history_count,
-                history_chars,
-            )
             agent = self._create_agent(
                 ephemeral_system_prompt=ephemeral_system_prompt,
                 session_id=session_id,
@@ -3106,15 +2780,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                 "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
             }
-            logger.info(
-                "[Api_Server] run complete session=%s elapsed=%.1fs prompt_tokens=%s "
-                "completion_tokens=%s total_tokens=%s",
-                session_id,
-                time.monotonic() - run_start,
-                usage["input_tokens"],
-                usage["output_tokens"],
-                usage["total_tokens"],
-            )
             # Include the effective session ID in the result so callers
             # (e.g. X-Hermes-Session-Id header) can track compression-
             # triggered session rotations. (#16938)
@@ -3274,12 +2939,14 @@ class APIServerAdapter(BasePlatformAdapter):
 
         run_id = f"run_{uuid.uuid4().hex}"
         session_id = body.get("session_id") or stored_session_id or run_id
+        approval_session_key = gateway_session_key or session_id or run_id
         ephemeral_system_prompt = instructions
         loop = asyncio.get_running_loop()
         q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
         created_at = time.time()
         self._run_streams[run_id] = q
         self._run_streams_created[run_id] = created_at
+        self._run_approval_sessions[run_id] = approval_session_key
 
         event_cb = self._make_run_event_callback(run_id, loop)
 
@@ -3316,13 +2983,66 @@ class APIServerAdapter(BasePlatformAdapter):
                     gateway_session_key=gateway_session_key,
                 )
                 self._active_run_agents[run_id] = agent
-                def _run_sync():
-                    effective_task_id = session_id or run_id
-                    r = agent.run_conversation(
-                        user_message=user_message,
-                        conversation_history=conversation_history,
-                        task_id=effective_task_id,
+
+                def _approval_notify(approval_data: Dict[str, Any]) -> None:
+                    event = dict(approval_data or {})
+                    event.update({
+                        "event": "approval.request",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                        "choices": ["once", "session", "always", "deny"],
+                    })
+                    self._set_run_status(
+                        run_id,
+                        "waiting_for_approval",
+                        last_event="approval.request",
                     )
+                    try:
+                        loop.call_soon_threadsafe(q.put_nowait, event)
+                    except Exception:
+                        pass
+
+                def _run_sync():
+                    from gateway.session_context import clear_session_vars, set_session_vars
+                    from tools.approval import (
+                        register_gateway_notify,
+                        reset_current_session_key,
+                        set_current_session_key,
+                        unregister_gateway_notify,
+                    )
+
+                    effective_task_id = session_id or run_id
+                    approval_token = None
+                    session_tokens = []
+                    try:
+                        # Bind approval/session identity for this API run via
+                        # contextvars so concurrent runs do not share process
+                        # environment state.
+                        approval_token = set_current_session_key(approval_session_key)
+                        session_tokens = set_session_vars(
+                            platform="api_server",
+                            session_key=approval_session_key,
+                        )
+                        register_gateway_notify(approval_session_key, _approval_notify)
+                        r = agent.run_conversation(
+                            user_message=user_message,
+                            conversation_history=conversation_history,
+                            task_id=effective_task_id,
+                        )
+                    finally:
+                        try:
+                            unregister_gateway_notify(approval_session_key)
+                        finally:
+                            if approval_token is not None:
+                                try:
+                                    reset_current_session_key(approval_token)
+                                except Exception:
+                                    pass
+                            if session_tokens:
+                                try:
+                                    clear_session_vars(session_tokens)
+                                except Exception:
+                                    pass
                     u = {
                         "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                         "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
@@ -3397,6 +3117,17 @@ class APIServerAdapter(BasePlatformAdapter):
                 except Exception:
                     pass
             finally:
+                # If the asyncio wrapper is cancelled (for example via
+                # /stop), the executor thread can still be blocked waiting
+                # on an approval Event.  Unregistering here releases those
+                # waits immediately; the in-thread unregister is harmlessly
+                # idempotent on normal completion.
+                try:
+                    from tools.approval import unregister_gateway_notify
+
+                    unregister_gateway_notify(approval_session_key)
+                except Exception:
+                    pass
                 # Sentinel: signal SSE stream to close
                 try:
                     q.put_nowait(None)
@@ -3404,6 +3135,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     pass
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
+                self._run_approval_sessions.pop(run_id, None)
 
         task = asyncio.create_task(_run_and_close())
         self._active_run_tasks[run_id] = task
@@ -3487,6 +3219,95 @@ class APIServerAdapter(BasePlatformAdapter):
 
         return response
 
+
+    async def _handle_run_approval(self, request: "web.Request") -> "web.Response":
+        """POST /v1/runs/{run_id}/approval — resolve a pending run approval."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        run_id = request.match_info["run_id"]
+        status = self._run_statuses.get(run_id)
+        if status is None:
+            return web.json_response(
+                _openai_error(f"Run not found: {run_id}", code="run_not_found"),
+                status=404,
+            )
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(_openai_error("Invalid JSON"), status=400)
+
+        raw_choice = str(body.get("choice", "")).strip().lower()
+        aliases = {"approve": "once", "approved": "once", "allow": "once"}
+        choice = aliases.get(raw_choice, raw_choice)
+        allowed = {"once", "session", "always", "deny"}
+        if choice not in allowed:
+            return web.json_response(
+                _openai_error(
+                    "Invalid approval choice; expected one of: once, session, always, deny",
+                    code="invalid_approval_choice",
+                ),
+                status=400,
+            )
+
+        approval_session_key = self._run_approval_sessions.get(run_id)
+        if not approval_session_key:
+            return web.json_response(
+                _openai_error(
+                    f"Run has no active approval session: {run_id}",
+                    code="approval_not_active",
+                ),
+                status=409,
+            )
+
+        resolve_all = (
+            _coerce_request_bool(body.get("all"), default=False)
+            or _coerce_request_bool(body.get("resolve_all"), default=False)
+        )
+        try:
+            from tools.approval import resolve_gateway_approval
+
+            resolved = resolve_gateway_approval(
+                approval_session_key,
+                choice,
+                resolve_all=resolve_all,
+            )
+        except Exception as exc:
+            logger.exception("[api_server] approval resolution failed for run %s", run_id)
+            return web.json_response(_openai_error(str(exc)), status=500)
+
+        if resolved <= 0:
+            return web.json_response(
+                _openai_error(
+                    f"Run has no pending approval: {run_id}",
+                    code="approval_not_pending",
+                ),
+                status=409,
+            )
+
+        self._set_run_status(run_id, "running", last_event="approval.responded")
+        q = self._run_streams.get(run_id)
+        if q is not None:
+            try:
+                q.put_nowait({
+                    "event": "approval.responded",
+                    "run_id": run_id,
+                    "timestamp": time.time(),
+                    "choice": choice,
+                    "resolved": resolved,
+                })
+            except Exception:
+                pass
+
+        return web.json_response({
+            "object": "hermes.run.approval_response",
+            "run_id": run_id,
+            "choice": choice,
+            "resolved": resolved,
+        })
+
     async def _handle_stop_run(self, request: "web.Request") -> "web.Response":
         """POST /v1/runs/{run_id}/stop — interrupt a running agent."""
         auth_err = self._check_auth(request)
@@ -3539,10 +3360,19 @@ class APIServerAdapter(BasePlatformAdapter):
             ]
             for run_id in stale:
                 logger.debug("[api_server] sweeping orphaned run %s", run_id)
+                try:
+                    from tools.approval import unregister_gateway_notify
+
+                    approval_session_key = self._run_approval_sessions.get(run_id)
+                    if approval_session_key:
+                        unregister_gateway_notify(approval_session_key)
+                except Exception:
+                    pass
                 self._run_streams.pop(run_id, None)
                 self._run_streams_created.pop(run_id, None)
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
+                self._run_approval_sessions.pop(run_id, None)
 
             stale_statuses = [
                 run_id
@@ -3589,6 +3419,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/v1/runs", self._handle_runs)
             self._app.router.add_get("/v1/runs/{run_id}", self._handle_get_run)
             self._app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
+            self._app.router.add_post("/v1/runs/{run_id}/approval", self._handle_run_approval)
             self._app.router.add_post("/v1/runs/{run_id}/stop", self._handle_stop_run)
             # Start background sweep to clean up orphaned (unconsumed) run streams
             sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
@@ -3653,7 +3484,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 "[%s] API server listening on http://%s:%d (model: %s)",
                 self.name, self._host, self._port, self._model_name,
             )
-            self._schedule_agent_runtime_warmup()
             return True
 
         except Exception as e:
