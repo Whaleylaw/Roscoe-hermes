@@ -10352,6 +10352,7 @@ class GatewayRunner:
         # Truncate history to before the last user message and persist
         truncated = history[:last_user_idx]
         self.session_store.rewrite_transcript(session_entry.session_id, truncated)
+        self.session_store.truncate_timeline_last_exchange()
         # Reset stored token count — transcript was truncated
         session_entry.last_prompt_tokens = 0
         

@@ -63,6 +63,22 @@ MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 
 
+_CONVERSATIONAL_MEMORY_BOUNDARY_REPLIES = {
+    "/new": "Started a new conversation. The previous topic has been saved to memory.",
+    "/clear": "Started a new conversation. The previous topic has been saved to memory.",
+    "/reset": "Reset acknowledged. The previous topic has been saved to memory.",
+    "/compress": "Compression acknowledged. The current topic has been saved to memory.",
+}
+
+
+def _conversational_memory_boundary_response(message: str) -> Optional[str]:
+    """Return local replies for session-boundary commands handled by the API."""
+    if not isinstance(message, str):
+        return None
+    command = message.strip().split(maxsplit=1)[0].lower()
+    return _CONVERSATIONAL_MEMORY_BOUNDARY_REPLIES.get(command)
+
+
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
     """Parse a listen port without letting malformed env/config values crash startup."""
     try:
@@ -452,7 +468,10 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
+    "Access-Control-Allow-Headers": (
+        "Authorization, Content-Type, Idempotency-Key, "
+        "X-Hermes-Session-Id, X-Hermes-Session-Key, X-Hermes-Use-Unified-Timeline"
+    ),
 }
 
 
@@ -669,6 +688,11 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._gateway_config: Optional[Any] = None
+
+    def set_gateway_config(self, gateway_config: Any) -> None:
+        """Inject GatewayConfig for tests and gateway-managed adapter wiring."""
+        self._gateway_config = gateway_config
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -844,6 +868,88 @@ class APIServerAdapter(BasePlatformAdapter):
                 logger.debug("SessionDB unavailable for API server: %s", e)
         return self._session_db
 
+    def _unified_timeline_enabled(self) -> bool:
+        config = getattr(self._gateway_config, "unified_timeline", None)
+        return bool(getattr(config, "enabled", False))
+
+    @staticmethod
+    def _timeline_profile_id() -> str:
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            return get_active_profile_name() or "default"
+        except Exception:
+            return "default"
+
+    @staticmethod
+    def _timeline_source():
+        from gateway.session import SessionSource
+
+        return SessionSource(
+            platform=Platform.API_SERVER,
+            chat_id="api_server",
+            chat_type="api",
+            user_id="api_server",
+            user_name="API Server",
+        )
+
+    @staticmethod
+    def _timeline_rows_to_history(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        history: List[Dict[str, str]] = []
+        for row in rows:
+            content = row.get("content")
+            if not content:
+                continue
+            direction = row.get("direction")
+            role = "assistant" if direction == "outbound" else "user"
+            history.append({"role": role, "content": str(content)})
+        return history
+
+    def _load_unified_timeline_history(self, request: "web.Request") -> Optional[List[Dict[str, str]]]:
+        if not self._unified_timeline_enabled():
+            return None
+        if request.headers.get("X-Hermes-Use-Unified-Timeline", "").strip().lower() not in _TRUE_REQUEST_BOOL_STRINGS:
+            return None
+        db = self._ensure_session_db()
+        if db is None:
+            return None
+        try:
+            config = getattr(self._gateway_config, "unified_timeline", None)
+            limit = getattr(config, "max_messages", 200)
+            rows = db.get_timeline_messages(profile_id=self._timeline_profile_id(), limit=limit)
+            return self._timeline_rows_to_history(rows)
+        except Exception as exc:
+            logger.warning("Failed to load unified timeline history: %s", exc)
+            return None
+
+    def _record_unified_timeline_inbound(self, content: Any):
+        if not self._unified_timeline_enabled():
+            return None
+        db = self._ensure_session_db()
+        if db is None:
+            return None
+        try:
+            from gateway.unified_timeline import UnifiedTimeline
+
+            timeline = UnifiedTimeline(db=db, profile_id=self._timeline_profile_id())
+            return timeline, timeline.record_inbound(
+                source=self._timeline_source(),
+                content=_normalize_multimodal_content(content),
+                message_id=f"api-{uuid.uuid4().hex[:16]}",
+            )
+        except Exception as exc:
+            logger.warning("Failed to record unified timeline inbound: %s", exc)
+            return None
+
+    @staticmethod
+    def _record_unified_timeline_outbound(timeline_turn: Any, content: str) -> None:
+        if not timeline_turn:
+            return
+        try:
+            timeline, turn = timeline_turn
+            timeline.record_outbound(turn=turn, content=content or "")
+        except Exception as exc:
+            logger.warning("Failed to record unified timeline outbound: %s", exc)
+
     # ------------------------------------------------------------------
     # Agent creation helper
     # ------------------------------------------------------------------
@@ -914,6 +1020,39 @@ class APIServerAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
     # HTTP Handlers
     # ------------------------------------------------------------------
+
+    def _prepend_conversational_memory_context_to_system_prompt(
+        self,
+        *,
+        system_prompt: Optional[str],
+        conversation_history: List[Dict[str, Any]],
+        user_message: Any,
+        session_id: str,
+    ) -> Optional[str]:
+        """Layer conversational-memory context into the ephemeral system prompt."""
+        try:
+            from gateway.conversational_memory_context import maybe_prepend_conversational_memory_context
+
+            messages = list(conversation_history)
+            messages.append({"role": "user", "content": _normalize_multimodal_content(user_message)})
+            injected = maybe_prepend_conversational_memory_context(
+                messages=messages,
+                profile_id=self._timeline_profile_id(),
+                session_id=session_id,
+            )
+        except Exception as exc:
+            logger.warning("Conversational memory context injection failed: %s", exc)
+            return system_prompt
+
+        if not injected or injected[0].get("role") != "system":
+            return system_prompt
+
+        context_block = str(injected[0].get("content") or "").strip()
+        if not context_block:
+            return system_prompt
+        if system_prompt:
+            return f"{context_block}\n{system_prompt}"
+        return context_block
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
@@ -1134,6 +1273,37 @@ class APIServerAdapter(BasePlatformAdapter):
             session_id = _derive_chat_session_id(system_prompt, first_user)
             # history already set from request body above
 
+        unified_history = self._load_unified_timeline_history(request)
+        if unified_history is not None:
+            history = unified_history
+        timeline_turn = self._record_unified_timeline_inbound(user_message)
+
+        boundary_reply = _conversational_memory_boundary_response(user_message)
+        if boundary_reply is not None:
+            self._record_unified_timeline_outbound(timeline_turn, boundary_reply)
+            response_data = {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:29]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": body.get("model", self._model_name),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": boundary_reply},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            }
+            return web.json_response(response_data, headers={"X-Hermes-Session-Id": session_id})
+
+        system_prompt = self._prepend_conversational_memory_context_to_system_prompt(
+            system_prompt=system_prompt,
+            conversation_history=history,
+            user_message=user_message,
+            session_id=session_id,
+        )
+
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
@@ -1229,6 +1399,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 request, completion_id, model_name, created, _stream_q,
                 agent_task, agent_ref, session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                timeline_turn=timeline_turn,
             )
 
         # Non-streaming: run the agent (with optional Idempotency-Key)
@@ -1248,8 +1419,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_completion)
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
+                error_message = f"Internal server error: {e}"
+                self._record_unified_timeline_outbound(timeline_turn, error_message)
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    _openai_error(error_message, err_type="server_error"),
                     status=500,
                 )
         else:
@@ -1257,8 +1430,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _compute_completion()
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
+                error_message = f"Internal server error: {e}"
+                self._record_unified_timeline_outbound(timeline_turn, error_message)
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    _openai_error(error_message, err_type="server_error"),
                     status=500,
                 )
 
@@ -1300,6 +1475,10 @@ class APIServerAdapter(BasePlatformAdapter):
             }
             response_headers["X-Hermes-Completed"] = "false"
             response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
+            self._record_unified_timeline_outbound(
+                timeline_turn,
+                err_msg or "Agent run did not produce a response.",
+            )
             return web.json_response(err_body, status=502, headers=response_headers)
 
         # Soft-partial path: we have *some* text but the run did not complete
@@ -1339,12 +1518,13 @@ class APIServerAdapter(BasePlatformAdapter):
             if err_msg:
                 response_headers["X-Hermes-Error"] = err_msg[:200]
 
+        self._record_unified_timeline_outbound(timeline_turn, final_response)
         return web.json_response(response_data, headers=response_headers)
 
     async def _write_sse_chat_completion(
         self, request: "web.Request", completion_id: str, model: str,
         created: int, stream_q, agent_task, agent_ref=None, session_id: str = None,
-        gateway_session_key: str = None,
+        gateway_session_key: str = None, timeline_turn: Any = None,
     ) -> "web.StreamResponse":
         """Write real streaming SSE from agent's stream_delta_callback queue.
 
@@ -1441,8 +1621,17 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
+                if isinstance(result, dict):
+                    self._record_unified_timeline_outbound(
+                        timeline_turn,
+                        result.get("final_response") or "",
+                    )
             except Exception as exc:
                 logger.warning("Agent task %s failed, usage data lost: %s", completion_id, exc)
+                self._record_unified_timeline_outbound(
+                    timeline_turn,
+                    f"Internal server error: {exc}",
+                )
 
             # Finish chunk
             finish_chunk = {
@@ -2199,6 +2388,11 @@ class APIServerAdapter(BasePlatformAdapter):
         # groups the entire conversation under one session entry.
         session_id = stored_session_id or str(uuid.uuid4())
 
+        unified_history = self._load_unified_timeline_history(request)
+        if unified_history is not None:
+            conversation_history = unified_history
+        timeline_turn = self._record_unified_timeline_inbound(user_message)
+
         stream = _coerce_request_bool(body.get("stream"), default=False)
         if stream:
             # Streaming branch — emit OpenAI Responses SSE events as the
@@ -2297,8 +2491,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_response)
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
+                error_message = f"Internal server error: {e}"
+                self._record_unified_timeline_outbound(timeline_turn, error_message)
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    _openai_error(error_message, err_type="server_error"),
                     status=500,
                 )
         else:
@@ -2306,8 +2502,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, usage = await _compute_response()
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
+                error_message = f"Internal server error: {e}"
+                self._record_unified_timeline_outbound(timeline_turn, error_message)
                 return web.json_response(
-                    _openai_error(f"Internal server error: {e}", err_type="server_error"),
+                    _openai_error(error_message, err_type="server_error"),
                     status=500,
                 )
 
@@ -2367,6 +2565,7 @@ class APIServerAdapter(BasePlatformAdapter):
         response_headers = {"X-Hermes-Session-Id": session_id}
         if gateway_session_key:
             response_headers["X-Hermes-Session-Key"] = gateway_session_key
+        self._record_unified_timeline_outbound(timeline_turn, final_response)
         return web.json_response(response_data, headers=response_headers)
 
     # ------------------------------------------------------------------

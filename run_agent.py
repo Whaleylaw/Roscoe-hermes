@@ -100,6 +100,47 @@ else:
     logger.info("No .env file found. Using system environment variables.")
 
 
+def normalize_legacy_compression_config(config: Dict[str, Any]) -> list[str]:
+    """Map legacy ``compression.summary_*`` keys to auxiliary compression.
+
+    Older profile configs stored summarizer model settings under the
+    ``compression`` section. Current runtime config expects those values under
+    ``auxiliary.compression``. Only fill empty/default auxiliary fields so an
+    explicit modern config wins.
+    """
+    compression = config.get("compression")
+    if not isinstance(compression, dict):
+        return []
+    auxiliary = config.setdefault("auxiliary", {})
+    if not isinstance(auxiliary, dict):
+        return []
+    aux_compression = auxiliary.setdefault("compression", {})
+    if not isinstance(aux_compression, dict):
+        return []
+
+    legacy_to_current = {
+        "summary_model": "model",
+        "summary_provider": "provider",
+        "summary_base_url": "base_url",
+    }
+    defaults = {
+        "model": "",
+        "provider": "auto",
+        "base_url": "",
+    }
+    mapped: list[str] = []
+    for legacy_key, current_key in legacy_to_current.items():
+        legacy_value = compression.get(legacy_key)
+        if not legacy_value:
+            continue
+        current_value = aux_compression.get(current_key)
+        if current_value not in (None, "", defaults[current_key]):
+            continue
+        aux_compression[current_key] = legacy_value
+        mapped.append(current_key)
+    return mapped
+
+
 # Import our tool system
 from model_tools import (
     get_tool_definitions,

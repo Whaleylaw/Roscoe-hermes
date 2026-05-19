@@ -352,6 +352,31 @@ DEFAULT_STREAMING_CURSOR: str = " ▉"
 
 
 @dataclass
+class UnifiedTimelineConfig:
+    """Configuration for profile-wide gateway conversation timeline."""
+    enabled: bool = True
+    max_messages: int = 200
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "max_messages": self.max_messages,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "UnifiedTimelineConfig":
+        if not data:
+            return cls()
+        max_messages = _coerce_int(data.get("max_messages"), 200)
+        if max_messages < 1:
+            max_messages = 200
+        return cls(
+            enabled=_coerce_bool(data.get("enabled"), True),
+            max_messages=max_messages,
+        )
+
+
+@dataclass
 class StreamingConfig:
     """Configuration for real-time token streaming to messaging platforms."""
     enabled: bool = False
@@ -486,6 +511,9 @@ class GatewayConfig:
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
 
+    # Unified cross-channel timeline configuration
+    unified_timeline: UnifiedTimelineConfig = field(default_factory=UnifiedTimelineConfig)
+
     # Session store pruning: drop SessionEntry records older than this many
     # days from the in-memory dict and sessions.json.  Keeps the store from
     # growing unbounded in gateways serving many chats/threads/users over
@@ -585,6 +613,7 @@ class GatewayConfig:
             "thread_sessions_per_user": self.thread_sessions_per_user,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
+            "unified_timeline": self.unified_timeline.to_dict(),
             "session_store_max_age_days": self.session_store_max_age_days,
         }
     
@@ -653,6 +682,7 @@ class GatewayConfig:
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
+            unified_timeline=UnifiedTimelineConfig.from_dict(data.get("unified_timeline", {})),
             session_store_max_age_days=session_store_max_age_days,
         )
 

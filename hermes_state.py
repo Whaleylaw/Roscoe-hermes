@@ -248,6 +248,25 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS timeline_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    direction TEXT NOT NULL,
+    platform TEXT,
+    source_chat_id TEXT,
+    source_thread_id TEXT,
+    author TEXT,
+    content TEXT,
+    message_id TEXT,
+    turn_id TEXT,
+    timestamp REAL NOT NULL,
+    UNIQUE(profile_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_timeline_profile_seq ON timeline_messages(profile_id, seq);
+CREATE INDEX IF NOT EXISTS idx_timeline_profile_direction_seq ON timeline_messages(profile_id, direction, seq);
 """
 
 FTS_SQL = """
@@ -459,6 +478,114 @@ class SessionDB:
                     pass
                 self._conn.close()
                 self._conn = None
+
+    def append_timeline_message(
+        self,
+        *,
+        profile_id: str,
+        direction: str,
+        platform: Optional[str] = None,
+        source_chat_id: Optional[str] = None,
+        source_thread_id: Optional[str] = None,
+        author: Optional[str] = None,
+        content: Optional[str] = None,
+        message_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
+        ts: Optional[float] = None,
+    ) -> int:
+        """Append a cross-channel timeline row and return its profile seq."""
+        timestamp = ts if ts is not None else time.time()
+
+        def _write(conn: sqlite3.Connection) -> int:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq "
+                "FROM timeline_messages WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+            seq = int(row["next_seq"] if isinstance(row, sqlite3.Row) else row[0])
+            conn.execute(
+                """
+                INSERT INTO timeline_messages (
+                    profile_id, seq, direction, platform, source_chat_id,
+                    source_thread_id, author, content, message_id, turn_id,
+                    timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    profile_id,
+                    seq,
+                    direction,
+                    platform,
+                    source_chat_id,
+                    source_thread_id,
+                    author,
+                    content,
+                    message_id,
+                    turn_id,
+                    timestamp,
+                ),
+            )
+            return seq
+
+        return self._execute_write(_write)
+
+    def get_timeline_messages(
+        self,
+        *,
+        profile_id: str,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return timeline rows for a profile in chronological order."""
+        row_limit = 200 if limit is None else max(1, int(limit))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, profile_id, seq, direction, platform,
+                       source_chat_id, source_thread_id, author, content,
+                       message_id, turn_id, timestamp
+                FROM timeline_messages
+                WHERE profile_id = ?
+                ORDER BY seq ASC
+                LIMIT ?
+                """,
+                (profile_id, row_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_last_inbound_seq(self, profile_id: str) -> Optional[int]:
+        """Return the latest inbound timeline seq for a profile, if any."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT seq FROM timeline_messages
+                WHERE profile_id = ? AND direction = 'inbound'
+                ORDER BY seq DESC
+                LIMIT 1
+                """,
+                (profile_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return int(row["seq"] if isinstance(row, sqlite3.Row) else row[0])
+
+    def truncate_timeline_after(
+        self,
+        *,
+        profile_id: str,
+        seq: int,
+        inclusive: bool = False,
+    ) -> int:
+        """Delete timeline rows after ``seq`` for ``profile_id``."""
+        op = ">=" if inclusive else ">"
+
+        def _write(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                f"DELETE FROM timeline_messages WHERE profile_id = ? AND seq {op} ?",
+                (profile_id, seq),
+            )
+            return int(cursor.rowcount or 0)
+
+        return self._execute_write(_write)
 
     @staticmethod
     def _parse_schema_columns(schema_sql: str) -> Dict[str, Dict[str, str]]:
