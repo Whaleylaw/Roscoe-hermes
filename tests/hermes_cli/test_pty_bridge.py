@@ -132,17 +132,12 @@ class TestPtyBridgeClose:
         bridge = PtyBridge.spawn(["/bin/sh", "-c", "sleep 30"])
         pid = bridge.pid
         bridge.close()
-        # Give the kernel a moment to reap
+        # Use the bridge API instead of os.kill(pid, 0) so the live-system
+        # signal guard never probes an unrelated host PID during tests.
         deadline = time.monotonic() + 3.0
-        reaped = False
-        while time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-                time.sleep(0.05)
-            except ProcessLookupError:
-                reaped = True
-                break
-        assert reaped, f"pid {pid} still running after close()"
+        while bridge.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not bridge.is_alive(), f"pid {pid} still running after close()"
 
 
 @skip_on_windows

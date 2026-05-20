@@ -190,10 +190,9 @@ def test_get_platform_tools_expands_composite_when_mixed_with_configurable():
 
     enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
 
-    # Native tools must reappear.
-    for ts in ("terminal", "file", "web", "browser", "memory", "delegation",
-               "code_execution", "todo", "session_search", "skills"):
-        assert ts in enabled, f"{ts} should be enabled when hermes-cli is listed"
+    # Native tools from the default CLI composite must reappear.
+    default_cli = _get_platform_tools({}, "cli", include_default_mcp_servers=False)
+    assert default_cli.issubset(enabled), f"default CLI toolsets missing: {default_cli - enabled}"
     # User explicitly opted into Spotify — must survive _DEFAULT_OFF_TOOLSETS subtraction.
     assert "spotify" in enabled
 

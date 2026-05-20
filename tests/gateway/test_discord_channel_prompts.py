@@ -191,6 +191,7 @@ async def test_retry_preserves_channel_prompt(monkeypatch):
             {"role": "assistant", "content": "old reply"},
         ],
         rewrite_transcript=MagicMock(),
+        truncate_timeline_last_exchange=MagicMock(),
     )
     runner._handle_message = AsyncMock(return_value="ok")
 

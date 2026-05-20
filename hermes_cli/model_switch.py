@@ -755,10 +755,23 @@ def switch_model(
     # PATH B: No explicit provider — resolve from model input
     # =================================================================
     else:
-        # --- Step a: Try alias resolution on current provider ---
-        alias_result = resolve_alias(raw_input, current_provider)
+        # --- Step a: Prefer an exact current-provider catalog match over aliases ---
+        # Flat-namespace aggregators/resellers (for example opencode-go) can
+        # serve bare model IDs that also have global aliases pointing at a
+        # different provider. If the current provider's live catalog contains
+        # the requested ID, stay on the current provider.
+        current_catalog_match = ""
+        if is_aggregator(current_provider):
+            for mid in list_provider_models(current_provider) or []:
+                if mid.lower() == new_model.lower():
+                    current_catalog_match = mid
+                    break
 
-        if alias_result is not None:
+        alias_result = None if current_catalog_match else resolve_alias(raw_input, current_provider)
+
+        if current_catalog_match:
+            new_model = current_catalog_match
+        elif alias_result is not None:
             target_provider, new_model, resolved_alias = alias_result
             logger.debug(
                 "Alias '%s' resolved to %s on %s",

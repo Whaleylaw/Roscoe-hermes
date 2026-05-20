@@ -2823,7 +2823,9 @@ def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]
         configured = [
             _gateway_platform_short_label(plat["label"])
             for plat in _all_platforms()
-            if _platform_status(plat) and _platform_status(plat) != "not configured"
+            if plat.get("key") != "agentbus"
+            and _platform_status(plat)
+            and _platform_status(plat) != "not configured"
         ]
         if configured:
             return ", ".join(configured)

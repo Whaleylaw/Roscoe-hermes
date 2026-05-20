@@ -928,9 +928,11 @@ class TestProfileRestoration:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        # Mock the wrapper dir to be inside tmp_path
+        # Mock the wrapper dir to be inside tmp_path and isolate PATH so
+        # profile alias collision checks do not see real user commands.
         wrapper_dir = tmp_path / ".local" / "bin"
         wrapper_dir.mkdir(parents=True)
+        monkeypatch.setenv("PATH", str(wrapper_dir))
 
         zip_path = tmp_path / "backup.zip"
         self._make_backup_zip(zip_path, {
